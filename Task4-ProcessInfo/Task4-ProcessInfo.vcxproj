@@ -21,9 +21,10 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{A5BC05BA-F75B-42EA-9FF3-FE720425143F}</ProjectGuid>
-    <RootNamespace>Task3Systeminfo</RootNamespace>
+    <ProjectGuid>{96a9bfe0-2968-41bf-884a-bbed4600535a}</ProjectGuid>
+    <RootNamespace>Task4ProcessInfo</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>Task4_ProcessInfo</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -140,7 +141,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Task3_Systeminfo.cpp" />
+    <ClCompile Include="Task4-ProcessInfo.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
