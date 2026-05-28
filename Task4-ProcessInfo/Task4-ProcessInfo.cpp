@@ -9,6 +9,7 @@
 #include <sstream>
 #include <io.h>
 #include <fcntl.h>
+#include <algorithm>  
 
 using namespace std;
 
@@ -450,7 +451,16 @@ void PrintFinalReport(DWORD pid, const ProcessToolhelpCore& toolhelpCore) {
     wcout << left << setw(12) << L"Thread ID" << left << setw(16) << L"Base Priority" << L"Status\n";
     wcout << L"-------------------------------------------\n";
 
+    // 1. Trích xuất danh sách luồng sâu từ Kernel bằng bộ quét Hybrid
     vector<ThreadRecord> threads = ExtractProcessThreads(pid);
+
+    // 2. TỐI ƯU GIAO DIỆN: Sắp xếp các bản ghi Thread tăng dần theo Thread ID (TID)
+    // Sử dụng biểu thức Lambda để so sánh trường id thô
+    std::sort(threads.begin(), threads.end(), [](const ThreadRecord& a, const ThreadRecord& b) {
+        return a.id < b.id;
+        });
+
+    // 3. Đẩy dữ liệu sạch đã sắp xếp ra tầng hiển thị CLI
     for (const auto& th : threads) {
         wcout << left << setw(12) << th.id << left << setw(16) << th.priority << th.status << endl;
     }
