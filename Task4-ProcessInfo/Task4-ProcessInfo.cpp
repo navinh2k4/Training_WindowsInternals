@@ -18,7 +18,6 @@ using namespace std;
 const int LAYOUT_WIDTH = 43;
 const int COL_LABEL_WIDTH = 19;
 
-// Định nghĩa cấu trúc ngầm từ NTDLL phục vụ bóc PEB nâng cao
 typedef struct _UNICODE_STRING {
     USHORT Length;
     USHORT MaximumLength;
@@ -39,35 +38,14 @@ typedef NTSTATUS(WINAPI* NtQueryInformationProcessPtr)(
     HANDLE, DWORD, PVOID, ULONG, PULONG
     );
 
-// Minimal CLIENT_ID and THREAD_BASIC_INFORMATION definitions used by NtQueryInformationThread
-typedef struct _CLIENT_ID {
-    PVOID UniqueProcess;
-    PVOID UniqueThread;
-} CLIENT_ID;
-
-typedef struct _THREAD_BASIC_INFORMATION {
-    NTSTATUS ExitStatus;
-    PVOID    TebBaseAddress;
-    CLIENT_ID ClientId;
-    ULONG_PTR AffinityMask;
-    LONG     Priority;
-    LONG     BasePriority;
-} THREAD_BASIC_INFORMATION;
-
-// Prototype for NtQueryInformationThread (from ntdll)
-typedef NTSTATUS(WINAPI* NtQueryInformationThreadPtr)(
-    HANDLE, DWORD, PVOID, ULONG, PULONG
-    );
-
-// Cấu trúc dữ liệu trung gian sạch
 struct PrivilegeRecord {
-    wstring name;
-    wstring state;
+    std::wstring name;
+    std::wstring state;
 };
 
 struct ModuleRecord {
-    wstring name;
-    wstring fullPath;
+    std::wstring name;
+    std::wstring fullPath;
     PVOID baseAddress;
     DWORD size;
 };
@@ -75,11 +53,17 @@ struct ModuleRecord {
 struct ThreadRecord {
     DWORD id;
     LONG priority;
-    wstring status;
+    std::wstring status;
+};
+
+struct ProcessToolhelpCore {
+    DWORD parentPid;
+    DWORD threadCount;
+    bool found;
 };
 
 // ========================================================================
-// 1. TẦNG TRÍCH XUẤT DỮ LIỆU THÔ WINAPI (LOW-LEVEL EXTRACTORS - ATOMIC)
+// 1. TẦNG TRÍCH XUẤT DỮ LIỆU THÔ WINAPI THUẦN (LOW-LEVEL EXTRACTORS - ATOMIC)
 // ========================================================================
 
 HANDLE CreateProcessSnapshot() {
@@ -95,149 +79,131 @@ bool GetNextProcessEntry(HANDLE hSnapshot, PROCESSENTRY32W& entry) {
     return Process32NextW(hSnapshot, &entry) != FALSE;
 }
 
-DWORD FindProcessIdByName(const wstring& targetName) {
-    DWORD targetPid = 0;
+// Tuyệt đối dỡ bỏ việc lặp Snapshot, quét DUY NHẤT một vòng để khóa thông số Core
+ProcessToolhelpCore ExtractTargetProcessCoreInfo(DWORD targetPid, const wstring& targetName, bool searchByPid) {
+    ProcessToolhelpCore coreResult = { 0, 0, false };
     HANDLE hSnapshot = CreateProcessSnapshot();
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+    if (hSnapshot == INVALID_HANDLE_VALUE) return coreResult;
 
     PROCESSENTRY32W pe;
     if (GetFirstProcessEntry(hSnapshot, pe)) {
         do {
-            if (_wcsicmp(pe.szExeFile, targetName.c_str()) == 0) {
-                targetPid = pe.th32ProcessID;
+            bool match = searchByPid ? (pe.th32ProcessID == targetPid) : (_wcsicmp(pe.szExeFile, targetName.c_str()) == 0);
+            if (match) {
+                coreResult.parentPid = pe.th32ParentProcessID;
+                coreResult.threadCount = pe.cntThreads;
+                coreResult.found = true;
+                if (!searchByPid) {
+                    SetLastError(pe.th32ProcessID); // Đồng bộ PID thông qua API Error channel
+                }
                 break;
             }
         } while (GetNextProcessEntry(hSnapshot, pe));
     }
     CloseHandle(hSnapshot);
-    return targetPid;
+    return coreResult;
 }
 
-DWORD ExtractParentProcessId(DWORD targetPid) {
-    DWORD parentPid = 0;
-    HANDLE hSnapshot = CreateProcessSnapshot();
-    if (hSnapshot != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe;
-        if (GetFirstProcessEntry(hSnapshot, pe)) {
-            do {
-                if (pe.th32ProcessID == targetPid) {
-                    parentPid = pe.th32ParentProcessID;
-                    break;
-                }
-            } while (GetNextProcessEntry(hSnapshot, pe));
-        }
-        CloseHandle(hSnapshot);
-    }
-    return parentPid;
-}
-
-DWORD ExtractThreadCount(DWORD targetPid) {
-    DWORD threadCount = 0;
-    HANDLE hSnapshot = CreateProcessSnapshot();
-    if (hSnapshot != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe;
-        if (GetFirstProcessEntry(hSnapshot, pe)) {
-            do {
-                if (pe.th32ProcessID == targetPid) {
-                    threadCount = pe.cntThreads;
-                    break;
-                }
-            } while (GetNextProcessEntry(hSnapshot, pe));
-        }
-        CloseHandle(hSnapshot);
-    }
-    return threadCount;
-}
-
-wstring GetProcessExecutablePath(DWORD pid) {
-    wstring fullPath = L"N/A";
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (hProcess != NULL) {
-        DWORD size = MAX_PATH;
-        vector<wchar_t> buffer(size);
-        while (QueryFullProcessImageNameW(hProcess, 0, buffer.data(), &size) == 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+wstring GetProcessExecutablePath(HANDLE hProcess) {
+    DWORD size = MAX_PATH;
+    vector<wchar_t> buffer(size);
+    while (QueryFullProcessImageNameW(hProcess, 0, buffer.data(), &size) == 0) {
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
             size *= 2;
             buffer.resize(size);
         }
-        fullPath = buffer.data();
-        CloseHandle(hProcess);
+        else {
+            return L"N/A";
+        }
     }
-    return fullPath;
+    return wstring(buffer.data());
 }
 
-wstring GetProcessCommandLineFromPeb(DWORD pid) {
+wstring GetProcessCommandLineFromPeb(HANDLE hProcess) {
     wstring commandLineStr = L"N/A";
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    if (hProcess == NULL) return L"N/A (Access Denied)";
-
     HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
-    if (hNtDll) {
-        NtQueryInformationProcessPtr NtQueryInformationProcess =
-            (NtQueryInformationProcessPtr)GetProcAddress(hNtDll, "NtQueryInformationProcess");
+    if (!hNtDll) return commandLineStr;
 
-        if (NtQueryInformationProcess) {
-            PROCESS_BASIC_INFORMATION pbi;
-            ULONG returnLength = 0;
-            if (NtQueryInformationProcess(hProcess, 0, &pbi, sizeof(pbi), &returnLength) == 0) {
-                ULONG_PTR pebOffset = (sizeof(PVOID) == 8) ? 0x20 : 0x10;
-                PVOID processParametersAddr = NULL;
+    NtQueryInformationProcessPtr NtQueryInformationProcess =
+        (NtQueryInformationProcessPtr)GetProcAddress(hNtDll, "NtQueryInformationProcess");
 
-                if (ReadProcessMemory(hProcess, (PBYTE)pbi.PebBaseAddress + pebOffset, &processParametersAddr, sizeof(PVOID), NULL)) {
-                    ULONG_PTR cmdLineOffset = (sizeof(PVOID) == 8) ? 0x70 : 0x40;
-                    UNICODE_STRING cmdLineUnicodeStr;
+    if (NtQueryInformationProcess) {
+        PROCESS_BASIC_INFORMATION pbi;
+        ULONG returnLength = 0;
+        if (NtQueryInformationProcess(hProcess, 0, &pbi, sizeof(pbi), &returnLength) == 0) {
+            ULONG_PTR pebOffset = (sizeof(PVOID) == 8) ? 0x20 : 0x10;
+            PVOID processParametersAddr = NULL;
 
-                    if (ReadProcessMemory(hProcess, (PBYTE)processParametersAddr + cmdLineOffset, &cmdLineUnicodeStr, sizeof(cmdLineUnicodeStr), NULL)) {
-                        vector<wchar_t> cmdBuffer(cmdLineUnicodeStr.Length / sizeof(wchar_t) + 1, L'\0');
-                        if (ReadProcessMemory(hProcess, cmdLineUnicodeStr.Buffer, cmdBuffer.data(), cmdLineUnicodeStr.Length, NULL)) {
-                            commandLineStr = cmdBuffer.data();
-                        }
+            if (ReadProcessMemory(hProcess, (PBYTE)pbi.PebBaseAddress + pebOffset, &processParametersAddr, sizeof(PVOID), NULL)) {
+                ULONG_PTR cmdLineOffset = (sizeof(PVOID) == 8) ? 0x70 : 0x40;
+                UNICODE_STRING cmdLineUnicodeStr;
+
+                if (ReadProcessMemory(hProcess, (PBYTE)processParametersAddr + cmdLineOffset, &cmdLineUnicodeStr, sizeof(cmdLineUnicodeStr), NULL)) {
+                    size_t charCount = cmdLineUnicodeStr.Length / sizeof(wchar_t);
+                    vector<wchar_t> cmdBuffer(charCount + 1, L'\0');
+                    if (ReadProcessMemory(hProcess, cmdLineUnicodeStr.Buffer, cmdBuffer.data(), cmdLineUnicodeStr.Length, NULL)) {
+                        commandLineStr = wstring(cmdBuffer.data(), charCount);
                     }
                 }
             }
         }
     }
-    CloseHandle(hProcess);
     return commandLineStr;
 }
 
-wstring GetProcessOwnerName(DWORD pid) {
+wstring GetProcessOwnerName(HANDLE hProcess) {
     wstring ownerName = L"N/A";
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (hProcess != NULL) {
-        HANDLE hToken = NULL;
-        if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
-            DWORD tokenSize = 0;
-            GetTokenInformation(hToken, TokenUser, NULL, 0, &tokenSize);
-            if (tokenSize > 0) {
-                vector<BYTE> buffer(tokenSize);
-                PTOKEN_USER pTokenUser = reinterpret_cast<PTOKEN_USER>(buffer.data());
-                if (GetTokenInformation(hToken, TokenUser, pTokenUser, tokenSize, &tokenSize)) {
-                    WCHAR name[256] = { 0 }, domain[256] = { 0 };
-                    DWORD nameLen = 256, domainLen = 256;
-                    SID_NAME_USE sidUse;
-                    if (LookupAccountSidW(NULL, pTokenUser->User.Sid, name, &nameLen, domain, &domainLen, &sidUse)) {
-                        ownerName = wstring(domain) + L"\\" + wstring(name);
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
+        DWORD tokenSize = 0;
+        GetTokenInformation(hToken, TokenUser, NULL, 0, &tokenSize);
+        if (tokenSize > 0) {
+            vector<BYTE> buffer(tokenSize);
+            PTOKEN_USER pTokenUser = reinterpret_cast<PTOKEN_USER>(buffer.data());
+            if (GetTokenInformation(hToken, TokenUser, pTokenUser, tokenSize, &tokenSize)) {
+                DWORD nameLen = 0, domainLen = 0;
+                SID_NAME_USE sidUse;
+                LookupAccountSidW(NULL, pTokenUser->User.Sid, NULL, &nameLen, NULL, &domainLen, &sidUse);
+
+                if (nameLen > 0 && domainLen > 0) {
+                    vector<wchar_t> nameBuf(nameLen);
+                    vector<wchar_t> domainBuf(domainLen);
+                    if (LookupAccountSidW(NULL, pTokenUser->User.Sid, nameBuf.data(), &nameLen, domainBuf.data(), &domainLen, &sidUse)) {
+                        ownerName = wstring(domainBuf.data()) + L"\\" + wstring(nameBuf.data());
                     }
                 }
             }
-            CloseHandle(hToken);
         }
-        CloseHandle(hProcess);
+        CloseHandle(hToken);
     }
     return ownerName;
 }
 
+// ========================================================================
+// HÀM NGUYÊN TỬ: ĐỌC VÀ CHUYỂN ĐỔI GIỜ TẠO TIẾN TRÌNH THEO MÚI GIỜ ĐỊA PHƯƠNG
+// ========================================================================
 wstring GetProcessCreatedTime(HANDLE hProcess) {
-    FILETIME createTime, exitTime, kernelTime, userTime;
-    if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
-        FILETIME localFileTime;
-        SYSTEMTIME sysTime;
-        if (FileTimeToLocalFileTime(&createTime, &localFileTime) && FileTimeToSystemTime(&localFileTime, &sysTime)) {
-            wstringstream wss;
-            wss << setfill(L'0') << setw(4) << sysTime.wYear << L"-"
-                << setw(2) << sysTime.wMonth << L"-" << setw(2) << sysTime.wDay << L" "
-                << setw(2) << sysTime.wHour << L":" << setw(2) << sysTime.wMinute << L":" << setw(2) << sysTime.wSecond;
-            return wss.str();
+    FILETIME createTimeUTC, exitTime, kernelTime, userTime;
+
+    // Bước 1: Trích xuất mốc thời gian cấu trúc UTC thô từ Kernel Object
+    if (GetProcessTimes(hProcess, &createTimeUTC, &exitTime, &kernelTime, &userTime)) {
+        FILETIME createTimeLocal;
+
+        // Bước 2: Vận dụng WinAPI dịch múi giờ UTC thô sang múi giờ Local thực tế của máy (Bias UTC+7)
+        if (FileTimeToLocalFileTime(&createTimeUTC, &createTimeLocal)) {
+            SYSTEMTIME sysTime;
+
+            // Bước 3: Thông dịch định dạng cấu trúc nhị phân sang định dạng số SYSTEMTIME
+            if (FileTimeToSystemTime(&createTimeLocal, &sysTime)) {
+                wstringstream wss;
+
+                // Định dạng chuỗi văn bản đầu ra ngăn nắp theo cấu trúc form mẫu
+                wss << setfill(L'0') << setw(4) << sysTime.wYear << L"-"
+                    << setw(2) << sysTime.wMonth << L"-" << setw(2) << sysTime.wDay << L" "
+                    << setw(2) << sysTime.wHour << L":" << setw(2) << sysTime.wMinute << L":" << setw(2) << sysTime.wSecond;
+
+                return wss.str();
+            }
         }
     }
     return L"N/A";
@@ -255,33 +221,32 @@ wstring GetProcessArchitecture(HANDLE hProcess) {
     return L"Unknown";
 }
 
-vector<PrivilegeRecord> ExtractProcessPrivileges(DWORD pid) {
+vector<PrivilegeRecord> ExtractProcessPrivileges(HANDLE hProcess) {
     vector<PrivilegeRecord> privList;
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (hProcess != NULL) {
-        HANDLE hToken = NULL;
-        if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
-            DWORD size = 0;
-            GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &size);
-            if (size > 0) {
-                vector<BYTE> buffer(size);
-                PTOKEN_PRIVILEGES pPrivs = reinterpret_cast<PTOKEN_PRIVILEGES>(buffer.data());
-                if (GetTokenInformation(hToken, TokenPrivileges, pPrivs, size, &size)) {
-                    for (DWORD i = 0; i < pPrivs->PrivilegeCount; i++) {
-                        WCHAR privName[256] = { 0 };
-                        DWORD nameLen = 256;
-                        if (LookupPrivilegeNameW(NULL, &pPrivs->Privileges[i].Luid, privName, &nameLen)) {
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
+        DWORD size = 0;
+        GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &size);
+        if (size > 0) {
+            vector<BYTE> buffer(size);
+            PTOKEN_PRIVILEGES pPrivs = reinterpret_cast<PTOKEN_PRIVILEGES>(buffer.data());
+            if (GetTokenInformation(hToken, TokenPrivileges, pPrivs, size, &size)) {
+                for (DWORD i = 0; i < pPrivs->PrivilegeCount; i++) {
+                    DWORD nameLen = 0;
+                    LookupPrivilegeNameW(NULL, &pPrivs->Privileges[i].Luid, NULL, &nameLen);
+                    if (nameLen > 0) {
+                        vector<wchar_t> privNameBuf(nameLen);
+                        if (LookupPrivilegeNameW(NULL, &pPrivs->Privileges[i].Luid, privNameBuf.data(), &nameLen)) {
                             PrivilegeRecord rec;
-                            rec.name = privName;
+                            rec.name = privNameBuf.data();
                             rec.state = (pPrivs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) ? L"Enabled" : L"Disabled";
                             privList.push_back(rec);
                         }
                     }
                 }
             }
-            CloseHandle(hToken);
         }
-        CloseHandle(hProcess);
+        CloseHandle(hToken);
     }
     return privList;
 }
@@ -307,29 +272,38 @@ vector<ModuleRecord> ExtractProcessModules(DWORD pid) {
     return moduleList;
 }
 
+// VẬN DỤNG TỐI ĐA WINAPI THUẦN: Kiểm tra hiệu năng thực thi của Thread qua GetThreadTimes
 wstring GetThreadRealStatus(DWORD threadId) {
+    wstring statusStr = L"Waiting";
+    // Sử dụng quyền truy vấn WinAPI chuẩn thay vì gọi hàm ngầm ntdll
     HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, threadId);
     if (hThread != NULL) {
-        HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
-        if (hNtDll) {
-            NtQueryInformationThreadPtr NtQueryInformationThread =
-                (NtQueryInformationThreadPtr)GetProcAddress(hNtDll, "NtQueryInformationThread");
-            if (NtQueryInformationThread) {
-                DWORD suspendCount = SuspendThread(hThread);
-                if (suspendCount != (DWORD)-1) {
-                    ResumeThread(hThread);
-                    if (suspendCount > 0) { CloseHandle(hThread); return L"Suspended"; }
-                }
-                THREAD_BASIC_INFORMATION tbi;
-                if (NtQueryInformationThread(hThread, 0, &tbi, sizeof(tbi), NULL) == 0) {
-                    CloseHandle(hThread);
-                    return (tbi.Priority == 0) ? L"Waiting" : L"Running";
-                }
+        FILETIME cTime, eTime, kTime, uTime;
+        if (GetThreadTimes(hThread, &cTime, &eTime, &kTime, &uTime)) {
+            // Nếu luồng tiêu thụ Kernel Time hoặc User Time lớn hơn 0 trong phiên làm việc, chứng tỏ nó đang Running hoạt động
+            ULARGE_INTEGER kernelTime, userTime;
+            kernelTime.LowPart = kTime.dwLowDateTime;
+            kernelTime.HighPart = kTime.dwHighDateTime;
+            userTime.LowPart = uTime.dwLowDateTime;
+            userTime.HighPart = uTime.dwHighDateTime;
+
+            if (kernelTime.QuadPart > 0 || userTime.QuadPart > 0) {
+                statusStr = L"Running";
             }
+            else {
+                statusStr = L"Waiting";
+            }
+        }
+
+        // Kiểm tra trạng thái Suspended thô bằng WinAPI chuẩn
+        DWORD suspendCount = SuspendThread(hThread);
+        if (suspendCount != (DWORD)-1) {
+            ResumeThread(hThread); // Trả lại trạng thái cũ ngay lập tức
+            if (suspendCount > 0) statusStr = L"Suspended";
         }
         CloseHandle(hThread);
     }
-    return L"Waiting";
+    return statusStr;
 }
 
 vector<ThreadRecord> ExtractProcessThreads(DWORD targetPid) {
@@ -396,14 +370,14 @@ void PrintRowFormatted(const wstring& label, const wstring& value) {
     wcout << left << setw(LAYOUT_WIDTH) << label << L": " << value << endl;
 }
 
-void PrintFinalReport(DWORD pid) {
+void PrintFinalReport(DWORD pid, const ProcessToolhelpCore& toolhelpCore) {
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (hProcess == NULL) {
-        wcerr << L"Loi: Khong the mo ket noi voi PID mục tiêu để xuất report.\n";
+        wcerr << L"Loi: Khong the mo ket noi voi PID muc tieu de xuat report.\n";
         return;
     }
 
-    wstring fullPath = GetProcessExecutablePath(pid);
+    wstring fullPath = GetProcessExecutablePath(hProcess);
     wstring procName = ExtractFileNameFromPath(fullPath);
     DWORD sessionId = 0;
     ProcessIdToSessionId(pid, &sessionId);
@@ -415,6 +389,9 @@ void PrintFinalReport(DWORD pid) {
     pmc.cb = sizeof(PROCESS_MEMORY_COUNTERS_EX);
     GetProcessMemoryInfo(hProcess, (PPROCESS_MEMORY_COUNTERS)&pmc, sizeof(pmc));
 
+    BOOL isTargetWow64 = FALSE;
+    IsWow64Process(hProcess, &isTargetWow64);
+
     wcout << L"===========================================\n";
     wcout << L"PROCESS INFORMATION REPORT\n";
     wcout << L"===========================================\n\n";
@@ -423,21 +400,21 @@ void PrintFinalReport(DWORD pid) {
     wcout << L"-------------------------------------------\n";
     PrintRowFormatted(L"Process Name", procName);
     PrintRowFormatted(L"Process ID (PID)", to_wstring(pid));
-    PrintRowFormatted(L"Parent PID", to_wstring(ExtractParentProcessId(pid)));
+    PrintRowFormatted(L"Parent PID", to_wstring(toolhelpCore.parentPid));
     PrintRowFormatted(L"Executable Path", fullPath);
-    PrintRowFormatted(L"Command Line", GetProcessCommandLineFromPeb(pid));
+    PrintRowFormatted(L"Command Line", GetProcessCommandLineFromPeb(hProcess));
     PrintRowFormatted(L"Session ID", to_wstring(sessionId));
     PrintRowFormatted(L"Priority Class", TranslatePriorityClass(GetPriorityClass(hProcess)));
     PrintRowFormatted(L"Handle Count", to_wstring(handleCount));
-    PrintRowFormatted(L"Thread Count", to_wstring(ExtractThreadCount(pid)));
+    PrintRowFormatted(L"Thread Count", to_wstring(toolhelpCore.threadCount));
     PrintRowFormatted(L"Architecture", GetProcessArchitecture(hProcess));
     PrintRowFormatted(L"Created Time", GetProcessCreatedTime(hProcess));
-    PrintRowFormatted(L"User", GetProcessOwnerName(pid));
+    PrintRowFormatted(L"User", GetProcessOwnerName(hProcess));
     wcout << L"\n-------------------------------------------\n";
 
     wcout << L"[PRIVILEGES]\n";
     wcout << L"-------------------------------------------\n";
-    vector<PrivilegeRecord> privileges = ExtractProcessPrivileges(pid);
+    vector<PrivilegeRecord> privileges = ExtractProcessPrivileges(hProcess);
     if (privileges.empty()) wcout << L"No privileges available or access denied.\n";
     for (const auto& priv : privileges) {
         wcout << left << setw(30) << priv.name << L": " << priv.state << endl;
@@ -456,11 +433,14 @@ void PrintFinalReport(DWORD pid) {
     wcout << L"-------------------------------------------\n";
     wcout << left << setw(18) << L"Base Address" << L" " << left << setw(10) << L"Size" << L" Module Name (Full Path)\n";
     wcout << L"-------------------------------------------\n";
+
     vector<ModuleRecord> modules = ExtractProcessModules(pid);
     for (const auto& mod : modules) {
-        wcout << L"0x" << uppercase << hex << setw(16) << setfill(L'0') << reinterpret_cast<ULONG_PTR>(mod.baseAddress)
+        // TỐI ƯU TOÁN HỌC: Tự động điều chỉnh độ rộng trường hex (8 ký tự cho 32-bit, 16 ký tự cho 64-bit)
+        int addressWidth = isTargetWow64 ? 8 : 16;
+        wcout << L"0x" << uppercase << hex << setw(addressWidth) << setfill(L'0') << reinterpret_cast<ULONG_PTR>(mod.baseAddress)
             << nouppercase << dec << setfill(L' ') << L" " << right << setw(7) << FormatModuleSizeString(mod.size)
-            << L"   " << mod.fullPath << endl;
+            << L"    " << mod.fullPath << endl;
     }
     wcout << L"Total Modules Loaded : " << modules.size() << endl;
     wcout << L"\n-------------------------------------------\n";
@@ -469,6 +449,7 @@ void PrintFinalReport(DWORD pid) {
     wcout << L"-------------------------------------------\n";
     wcout << left << setw(12) << L"Thread ID" << left << setw(16) << L"Base Priority" << L"Status\n";
     wcout << L"-------------------------------------------\n";
+
     vector<ThreadRecord> threads = ExtractProcessThreads(pid);
     for (const auto& th : threads) {
         wcout << left << setw(12) << th.id << left << setw(16) << th.priority << th.status << endl;
@@ -480,21 +461,19 @@ void PrintFinalReport(DWORD pid) {
     wcout << L"-------------------------------------------\n";
     PrintRowFormatted(L"Process Bitness", (sizeof(PVOID) == 8) ? L"64-bit" : L"32-bit");
     PrintRowFormatted(L"OS Architecture", L"x64");
+    PrintRowFormatted(L"IsWow64Process", isTargetWow64 ? L"Yes" : L"No");
 
-    BOOL isWow = FALSE;
-    IsWow64Process(hProcess, &isWow);
-    PrintRowFormatted(L"IsWow64Process", isWow ? L"Yes" : L"No");
-
-    // Đọc trường ImageBaseAddress từ PEB ngầm
-    HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
-    NtQueryInformationProcessPtr NtQueryInformationProcess =
-        (NtQueryInformationProcessPtr)GetProcAddress(hNtDll, "NtQueryInformationProcess");
-    PROCESS_BASIC_INFORMATION pbi;
-    ULONG retLen = 0;
+    HMODULE hModNt = GetModuleHandleW(L"ntdll.dll");
     PVOID imageBase = NULL;
-    if (NtQueryInformationProcess && NtQueryInformationProcess(hProcess, 0, &pbi, sizeof(pbi), &retLen) == 0) {
-        ULONG_PTR baseOffset = (sizeof(PVOID) == 8) ? 0x10 : 0x08;
-        ReadProcessMemory(hProcess, (PBYTE)pbi.PebBaseAddress + baseOffset, &imageBase, sizeof(PVOID), NULL);
+    if (hModNt) {
+        NtQueryInformationProcessPtr NtQueryInformationProcess =
+            (NtQueryInformationProcessPtr)GetProcAddress(hModNt, "NtQueryInformationProcess");
+        PROCESS_BASIC_INFORMATION pbi;
+        ULONG retLen = 0;
+        if (NtQueryInformationProcess && NtQueryInformationProcess(hProcess, 0, &pbi, sizeof(pbi), &retLen) == 0) {
+            ULONG_PTR baseOffset = (sizeof(PVOID) == 8) ? 0x10 : 0x08;
+            ReadProcessMemory(hProcess, (PBYTE)pbi.PebBaseAddress + baseOffset, &imageBase, sizeof(PVOID), NULL);
+        }
     }
     wcout << L"PEB ImageBaseAddress : 0x" << hex << uppercase << reinterpret_cast<ULONG_PTR>(imageBase) << nouppercase << dec << endl;
     PrintRowFormatted(L"Image Path from PEB", fullPath);
@@ -506,9 +485,6 @@ void PrintFinalReport(DWORD pid) {
     CloseHandle(hProcess);
 }
 
-// ========================================================================
-// TẦNG ĐIỀU PHỐI CHÍNH (MAIN CONTROLLER)
-// ========================================================================
 int wmain(int argc, wchar_t* argv[]) {
     if (_setmode(_fileno(stdout), _O_U16TEXT) == -1) return 1;
 
@@ -521,15 +497,16 @@ int wmain(int argc, wchar_t* argv[]) {
     wstring argumentFlag = argv[1];
     wstring argumentValue = argv[2];
     DWORD targetPid = 0;
+    ProcessToolhelpCore toolhelpCore = { 0, 0, false };
 
     if (argumentFlag == L"-p") {
         targetPid = stoul(argumentValue);
+        toolhelpCore = ExtractTargetProcessCoreInfo(targetPid, L"", true);
     }
     else if (argumentFlag == L"-n") {
-        targetPid = FindProcessIdByName(argumentValue);
-        if (targetPid == 0) {
-            wcout << L"Loi: Khong tim thay tien trinh nao co tên: " << argumentValue << endl;
-            return 1;
+        toolhelpCore = ExtractTargetProcessCoreInfo(0, argumentValue, false);
+        if (toolhelpCore.found) {
+            targetPid = GetLastError();
         }
     }
     else {
@@ -537,8 +514,11 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
 
-    // Thực thi xuất báo cáo tối cao chuẩn cấu trúc mẫu
-    PrintFinalReport(targetPid);
+    if (!toolhelpCore.found) {
+        wcout << L"Loi: Khong tim thay tien trinh muc tieu he thong.\n";
+        return 1;
+    }
 
+    PrintFinalReport(targetPid, toolhelpCore);
     return 0;
 }
