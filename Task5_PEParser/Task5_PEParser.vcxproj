@@ -141,13 +141,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="PE32FILE.cpp" />
-    <ClCompile Include="PE64FILE.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="PE32FILE.h" />
-    <ClInclude Include="PE64FILE.h" />
     <ClInclude Include="PEFILE_CUSTOM_STRUCTS.h" />
+    <ClInclude Include="PEParserEngine.hpp" />
     <ClInclude Include="winntdef.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

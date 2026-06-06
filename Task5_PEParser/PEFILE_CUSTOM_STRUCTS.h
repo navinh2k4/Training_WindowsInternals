@@ -20,13 +20,17 @@ typedef struct __RICH_HEADER {
     PRICH_HEADER_ENTRY entries;
 } RICH_HEADER, * PRICH_HEADER;
 
-// 4. ILT entries are simple scalars: a 32-bit value for PE32 and 64-bit for PE64.
-//    The high bit indicates an ordinal import (IMAGE_ORDINAL_FLAG32/64).
-typedef DWORD ILT_ENTRY_32;
+// 4. Định nghĩa kiểu dữ liệu Thunk nguyên thủy dạng Scaler cho ILT Table
+typedef DWORD     ILT_ENTRY_32;
 typedef ULONGLONG ILT_ENTRY_64;
 
-// 6. Cấu trúc phân rã ranh giới 16-bit của một bản ghi Base Relocation (Bảng di trú địa chỉ)
+// Định nghĩa các hằng số mặt nạ Bit hệ thống để bóc tách bit cao nhất (Ordinal Flag)
+#define BEAR_ORDINAL_FLAG64 0x8000000000000000ULL
+#define BEAR_ORDINAL_FLAG32 0x80000000
+#define BEAR_ORDINAL_MASK   0xFFFF
+
+// 5. Cấu trúc phân rã ranh giới 16-bit của một bản ghi Base Relocation
 typedef struct __BASE_RELOC_ENTRY {
     WORD OFFSET : 12; // 12 bit thấp lưu vị trí lệch trong trang bộ nhớ 4KB
-    WORD TYPE : 4;    // 4 bit cao lưu phân loại kiểu Relocation (Ví dụ: 0xA = DIR64)
+    WORD TYPE : 4;    // 4 bit cao lưu phân loại kiểu Relocation
 } BASE_RELOC_ENTRY, * PBASE_RELOC_ENTRY;

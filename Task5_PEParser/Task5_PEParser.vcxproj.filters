@@ -15,13 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="PE64FILE.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="PE32FILE.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -32,10 +26,7 @@
     <ClInclude Include="PEFILE_CUSTOM_STRUCTS.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="PE64FILE.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="PE32FILE.h">
+    <ClInclude Include="PEParserEngine.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>
