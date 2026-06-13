@@ -1,0 +1,17 @@
+name: Trigger Portfolio Update
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '**.md' # Chỉ trigger khi bạn có sửa đổi hoặc thêm mới file Markdown (bài viết)
+
+jobs:
+  trigger-vercel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Deploy Request to Vercel
+        run: |
+          curl -X POST "${{ secrets.VERCEL_DEPLOY_HOOK_URL }}"
