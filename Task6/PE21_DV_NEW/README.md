@@ -22,7 +22,7 @@ Dự án PE 21 hóa giải hàng rào an ninh bằng chiến thuật **Đại ph
 
 Khi hệ điều hành Windows OS hoặc các phân hệ quét bộ nhớ ảo của EDR Engine thực hiện bóc tách, rà soát cấu trúc PE (Portable Executable) của một tiến trình đang vận hành, chúng bắt buộc phải áp dụng quy chuẩn toán học ánh xạ con trỏ sau để định vị chính xác phân đoạn chỉ huy `IMAGE_NT_HEADERS`:
 
-$$\text{pNtHeaders} = \text{(PIMAGE\_NT\_HEADERS)}\left( \text{ImageBase} + \text{pDosHeader}\rightarrow\text{e\_lfanew} \right)$$
+$$\texttt{pNtHeaders} = \texttt{(PIMAGE\_NT\_HEADERS)}\left( \texttt{ImageBase} + \texttt{pDosHeader}\rightarrow\texttt{e\_lfanew} \right)$$
 
 Giải thuật của dự án PE 21 bẻ gãy và thao túng hoàn toàn công thức định vị hạ tầng này qua 4 giai đoạn ngầm tuyến tính tại không gian ảo của bộ nhớ:
 
