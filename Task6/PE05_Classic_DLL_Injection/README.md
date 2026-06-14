@@ -39,8 +39,6 @@ Quy trình toán học giải phẫu và ép nạp Image mô-đun chéo tiến t
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa tính toán kích thước chuỗi Wide Character (`wchar_t`) thích ứng kịch trần bảo mật hệ thống.
-
 ### Source.cpp:
 ```cpp
 #include <windows.h>
@@ -252,12 +250,7 @@ PS C:\Users\Admin\source\repos\Task6\PE05_Classic_DLL_Injection\x64\Release> C:\
 ```
 
 ### Demo
-<img width="1920" height="1080" alt="devenv_P3jw9hdaUH" src="https://github.com/user-attachments/assets/bf583db5-4602-41ad-befd-ff79ab6f6f7c" />
+<img width="1920" height="600" alt="devenv_P3jw9hdaUH" src="https://github.com/user-attachments/assets/bf583db5-4602-41ad-befd-ff79ab6f6f7c" />
 
-
-### 🎯 Phân tích hệ quả cấu trúc RAM kịch trần:
-
-* Khi tiến hành thẩm định không gian bộ nhớ ảo ảo hóa và danh sách mô-đun đã tải (**Loaded Modules**) của tiến trình mục tiêu `notepad.exe` thông qua các công cụ trinh sát chuyên sâu (như `Process Hacker` hoặc `Process Explorer`), tệp tin **`panda.dll`** xuất hiện chễm chệ, chiếm giữ một phân vùng thuộc tính `MEM_IMAGE` hợp pháp lọt lòng không gian ảo của Notepad.
-* Cơ chế `DLL_PROCESS_ATTACH` kích nổ thành công logic Payload (mở Máy tính hoặc thực thi mã ngầm) hoàn toàn trùng khớp với ngữ cảnh bảo mật của nạn nhân, kết thúc chu kỳ thí nghiệm một cách hoàn hảo kịch khung!
 
 ---
