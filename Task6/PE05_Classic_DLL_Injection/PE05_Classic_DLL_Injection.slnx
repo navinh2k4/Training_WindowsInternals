@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PandaDLL/PandaDLL.vcxproj" Id="c8c5b385-02c5-4c10-9757-caa43c55581b" />
+  <Project Path="PE05_Classic_DLL_Injection/Classic_DLL_Injection.vcxproj" Id="2db0f76a-5101-464b-b5ee-b7ab26a7a858" />
+</Solution>

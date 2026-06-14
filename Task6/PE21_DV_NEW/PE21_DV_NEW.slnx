@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE21_DV_NEW/DV_NEW.vcxproj" Id="5e8d4f98-3970-4c4c-8340-6c4cdfbd200f" />
+</Solution>

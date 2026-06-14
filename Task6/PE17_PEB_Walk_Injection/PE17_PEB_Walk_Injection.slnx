@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE17_PEB_Walk_Injection/PE17_PEB_Walk_Injection.vcxproj" Id="bf886a17-b2cc-4aa4-8997-d1df2d03269e" />
+</Solution>

@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE08_Process_Hollowing/Process_Hollowing.vcxproj" Id="eeab0766-fb56-43fe-9352-efaa10ca3030" />
+</Solution>

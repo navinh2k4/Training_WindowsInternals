@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE22_Injection_Through_Fiber/Injection_Through_Fiber.vcxproj" Id="4e57facb-3910-4580-a389-0d0876e22cd6" />
+</Solution>

@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE23_NTAPI_Injection/NTAPI_Injection.vcxproj" Id="2be1d3aa-c32d-4129-b7c5-ebdda6b34ece" />
+</Solution>

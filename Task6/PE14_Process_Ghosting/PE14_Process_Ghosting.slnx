@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE14_Process_Ghosting/Process_Ghosting.vcxproj" Id="88c9e9a9-f447-4839-a48d-c32f61f979db" />
+</Solution>

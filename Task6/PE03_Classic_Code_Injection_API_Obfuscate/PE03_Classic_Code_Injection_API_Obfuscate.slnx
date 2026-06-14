@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE03_Classic_Code_Injection_API_Obfuscate/Classic_Code_Injection_API_Obfuscate.vcxproj" Id="4cd69575-ea55-4b3a-b5b4-336edc5765b2" />
+</Solution>

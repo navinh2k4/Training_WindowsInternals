@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE10_AddressOfEntryPoint_Code_Injection/AddressOfEntryPoint_Code_Injection.vcxproj" Id="6031fea6-87c3-49eb-951e-15258304fd22" />
+</Solution>

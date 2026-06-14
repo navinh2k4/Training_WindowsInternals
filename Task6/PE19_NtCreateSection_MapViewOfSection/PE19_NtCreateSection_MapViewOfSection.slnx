@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE19_NtCreateSection_MapViewOfSection/NtCreateSection_MapViewOfSection.vcxproj" Id="23ff30f8-61dc-4df9-a552-ee34156db783" />
+</Solution>

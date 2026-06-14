@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="RWX_Hunting_Injection/RWX_Hunting_Injection.vcxproj" Id="a9a2ff09-0c69-4137-8792-be6c8290e9b0" />
+</Solution>

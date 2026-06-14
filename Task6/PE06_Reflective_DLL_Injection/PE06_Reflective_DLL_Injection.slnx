@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PandaDLL/panda.vcxproj" Id="562296be-deb3-403b-a674-21f42f6bae8b" />
+  <Project Path="PE06_Reflective_DLL_Injection/Injector.vcxproj" Id="4001a043-68d4-4bd0-9ac0-b0f33967d564" />
+</Solution>

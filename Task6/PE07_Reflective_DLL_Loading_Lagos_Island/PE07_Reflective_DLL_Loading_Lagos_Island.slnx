@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE07_Reflective_DLL_Loading_Lagos_Island/Reflective_DLL_Loading_Lagos_Island.vcxproj" Id="3d1ee5fe-7a1b-4aff-9e84-a194710bc538" />
+</Solution>

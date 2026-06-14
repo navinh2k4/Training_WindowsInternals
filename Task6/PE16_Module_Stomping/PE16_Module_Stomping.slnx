@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE16_Module_Stomping/Module_Stomping.vcxproj" Id="24d99adf-2d21-4b40-af69-3cb80693a193" />
+</Solution>

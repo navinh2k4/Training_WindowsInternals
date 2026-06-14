@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE11_APC_QUEUE_INJECTION/APC_QUEUE_INJECTION.vcxproj" Id="8ed9176a-f218-4f22-8657-76b67f3744f0" />
+</Solution>

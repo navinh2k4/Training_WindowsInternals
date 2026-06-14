@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE12_EarlyBird_Code_Injection/EarlyBird_Code_Injection.vcxproj" Id="df8f29e9-f229-42a7-82ec-b8c2f57a7842" />
+</Solution>

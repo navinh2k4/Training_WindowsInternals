@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE15_Remote_Thread_Hijacking/Remote_Thread_Hijacking.vcxproj" Id="26497f99-4e86-4599-9f50-f61d5791db6e" />
+</Solution>

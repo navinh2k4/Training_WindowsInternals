@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="PE20_Mokingjay/PE20_Mokingjay.vcxproj" Id="0bdc121d-783c-4b8c-ad81-2372e0e72f38" />
+</Solution>

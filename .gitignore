@@ -1,0 +1,22 @@
+# Visual Studio Temporary Files and Folders
+.vs/
+x64/
+Debug/
+Release/
+*.user
+*.suo
+*.db
+*.openeddf
+*. there
+*.sqlite
+*.vsidx
+*.log
+*.recipe
+*.tlog
+*.obj
+*.iobj
+*.ipdb
+*.pdb
+*.ilk
+*.exe
+*.dll
