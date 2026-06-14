@@ -260,12 +260,7 @@ PS C:\Users\Admin\source\repos\Task6\PE07_Reflective_DLL_Loading_Lagos_Island\x6
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_cAeNqlDm1h" src="https://github.com/user-attachments/assets/055f6b42-b507-4a35-85f4-749742da92b0" />
+<img width="1920" height="600" alt="devenv_cAeNqlDm1h" src="https://github.com/user-attachments/assets/055f6b42-b507-4a35-85f4-749742da92b0" />
 
-
-### 🎯 Phân tích hệ quả RAM:
-
-* Ngay sau khi lệnh `ResumeThread` được phát ra, CPU thức dậy từ trạng thái Suspended, tịnh tiến con trỏ lệnh và lập tức dẫm trúng mìn JMP Patch đã được Loader vá mịn tại tọa độ `EntryPoint` hợp pháp ban đầu của Notepad.
-* Luồng CPU bị điều hướng cưỡng bức, kích nổ mở bung ứng dụng Máy tính **`calc.exe` hiên ngang rực rỡ kịch trần kịch khung** dưới lớp vỏ bọc hoàn hảo của một tiến trình hệ thống, hoàn tất chuỗi bài Lab nâng cao một cách mỹ mãn!
 
 ---
