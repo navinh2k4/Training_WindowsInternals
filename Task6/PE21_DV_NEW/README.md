@@ -20,29 +20,25 @@ Dự án PE 21 hóa giải hàng rào an ninh bằng chiến thuật **Đại ph
 
 ## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Khi hệ điều hành Windows OS hoặc các bộ quét bộ nhớ ảo của EDR Engine thực hiện bóc tách, rà soát cấu trúc của một tiến trình đang vận hành, chúng bắt buộc phải áp dụng công thức toán học gán con trỏ sau để định vị vạch chỉ huy `IMAGE_NT_HEADERS`:
+Khi hệ điều hành Windows OS hoặc các phân hệ quét bộ nhớ ảo của EDR Engine thực hiện bóc tách, rà soát cấu trúc PE (Portable Executable) của một tiến trình đang vận hành, chúng bắt buộc phải áp dụng quy chuẩn toán học ánh xạ con trỏ sau để định vị chính xác phân đoạn chỉ huy `IMAGE_NT_HEADERS`:
 
-$$\text{pNtHeaders} = (\text{PIMAGE\_NT\_HEADERS})((DWORD\_PTR)\text{ImageBase} + \text{pDosHeader}\rightarrow\text{e\_lfanew})$$
+$$\text{pNtHeaders} = \text{(PIMAGE\_NT\_HEADERS)}\left( \text{ImageBase} + \text{pDosHeader}\rightarrow\text{e\_lfanew} \right)$$
 
-Giải thuật của dự án PE 21 bẻ gãy và thao túng hoàn toàn công thức định vị này qua 4 giai đoạn ngầm tại nhân Kernel:
-
-```
-[Mở Handle] ──> [VirtualAllocEx: Dựng cấu trúc NT Header ma trận + Payload]
-                     └──> [VirtualProtectEx: Mở khóa đặc quyền ghi đè vị trí offset 0x3C]
-                               └──> [WriteProcessMemory: Vá trường e_lfanew -> Kích nổ luồng CPU]
+Giải thuật của dự án PE 21 bẻ gãy và thao túng hoàn toàn công thức định vị hạ tầng này qua 4 giai đoạn ngầm tuyến tính tại không gian ảo của bộ nhớ:
 
 ```
+[ Khởi tạo Handle kết nối ] ──> [ VirtualAllocEx: Dựng cấu trúc NT Header ma trận + Payload ]
+                                        └──> [ VirtualProtectEx: Mở khóa đặc quyền ghi đè tại offset 0x3C ]
+                                                    └──> [ WriteProcessMemory: Vá trường e_lfanew -> Kích nổ luồng CPU ]
 
-1. **Khởi tạo ma trận PE giả mạo**: Loader triệu hồi API `VirtualAllocEx` để phân bổ một trang bộ nhớ ảo chéo tiến trình mang quyền hạn kịch trần **`PAGE_EXECUTE_READWRITE` (RWX)** inside lòng tiến trình đích. Tại phân vùng này, Loader nhân bản toàn vẹn cấu trúc `IMAGE_NT_HEADERS64` nguyên bản của Notepad, nhưng can thiệp tinh chỉnh trường dữ liệu `OptionalHeader.AddressOfEntryPoint` trỏ thẳng vào tọa độ của khối mã máy thực thi độc lập vị trí (PIC).
-2. **Phẫu thuật bẻ hướng cấu trúc (`e_lfanew` Patching)**: Để ép hệ thống thừa nhận NT Header giả mạo, Loader sử dụng hàm `WriteProcessMemory` can thiệp trực tiếp vào địa chỉ `ImageBase + 0x3C` (vị trí lưu trữ trường chỉ mục `e_lfanew` thuộc DOS Header của Notepad). Giá trị dịch chuyển mới được tính toán bằng phép toán bù trừ khoảng cách tuyến tính:
+```
 
-$$\text{New\_e\_lfanew} = (DWORD\_PTR)\text{RemoteFakeNtHeaderAddress} - (DWORD\_PTR)\text{ImageBase}$$
+1. **Khởi tạo ma trận PE ngụy trang**: Loader triệu hồi API hệ thống `VirtualAllocEx` để phân bổ một trang bộ nhớ ảo chéo tiến trình (Cross-Process Memory Allocation) mang thuộc tính đặc quyền kịch trần `PAGE_EXECUTE_READWRITE` (RWX) lọt lòng tiến trình đích. Tại phân vùng ảo này, Loader nhân bản toàn vẹn cấu trúc `IMAGE_NT_HEADERS64` nguyên bản của `notepad.exe`, nhưng can thiệp tinh chỉnh trường dữ liệu thực thi tối cao `OptionalHeader.AddressOfEntryPoint` trỏ thẳng vào tọa độ của khối mã máy độc lập vị trí (Position-Independent Code - PIC Payload).
+2. **Phẫu thuật bẻ hướng cấu trúc (e_lfanew Patching)**: Để cưỡng bách hệ thống và các bộ quét bảo mật phải thừa nhận cấu trúc NT Header giả mạo, Loader sử dụng hàm `WriteProcessMemory` can thiệp trực tiếp vào địa chỉ `ImageBase + 0x3C` (vị trí lưu trữ trường chỉ mục toán học `e_lfanew` thuộc DOS Header nguyên bản của Notepad). Giá trị dịch chuyển (Offset) mới được tính toán động dựa trên phép toán bù trừ khoảng cách tuyến tính giữa hai phân vùng không gian địa chỉ ảo:
 
+$$\text{New\_e\_lfanew} = \text{RemoteFakeNtHeaderAddress} - \text{ImageBase}$$
 
-
-Lúc này, bất kỳ lệnh hệ thống hoặc bộ quét an ninh nào thực hiện giải phẫu PE cấu trúc của Notepad đều bị bẻ hướng góc nhìn, đâm thẳng vào phân vùng ma trận do ta thiết lập.
-3. **Phân phối dòng chảy CPU**: Triệu hồi luồng từ xa đâm thẳng vào tọa độ EntryPoint đã được biến đổi, ép CPU tiến trình mục tiêu tự động rút lệnh thực thi Payload.
-4. **Hoàn trả trạng thái nguyên bản (Context Restoration)**: Ngay sau khi kích nổ luồng thực thi thành công, Loader lập tức thực hiện vá ngược lại giá trị `e_lfanew` gốc của Notepad nhằm khôi phục trạng thái phẳng sạch cho cấu trúc PEB, triệt tiêu 100% khả năng phát hiện biến dạng cấu trúc khi EDR kiểm tra ngược Call Stack.
+Do toàn bộ các phân hệ giám sát bộ nhớ (Memory Scanners) của EDR đều tin cậy vào trường chỉ mục `e_lfanew` gốc để duyệt tìm cấu trúc thực thi của tệp tin nhị phân, việc vá lại trường dữ liệu này khiến EDR hoàn toàn bị mù bẫy thông tin, chỉ thực hiện rà quét phân vùng NT Header ngụy trang mà Loader đã dựng sẵn, tạo tiền đề cho chiến dịch kích nổ luồng chạy.
 
 ---
 
