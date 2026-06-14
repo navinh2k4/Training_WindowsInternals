@@ -39,8 +39,7 @@ Hệ điều hành Windows quản lý quyền hạn thực thi, đọc, ghi củ
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn tuân thủ nghiêm ngặt nguyên lý thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** và bóc tách cấu trúc dữ liệu tuyệt đối nhằm triệt tiêu lỗi dịch chuyển địa chỉ tương đối (RIP-Relative Error).
-
+### Classic_Code_Injection_Remote_VP.cpp:
 ```cpp
 #include <windows.h>
 #include <tlhelp32.h>
@@ -210,12 +209,7 @@ PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Relea
 ```
 
 # Demo
-<img width="1920" height="1080" alt="devenv_8pZPtZUiqZ" src="https://github.com/user-attachments/assets/ce4f533d-a5fd-4a05-a11f-0764234734d6" />
+<img width="1920" height="600" alt="devenv_8pZPtZUiqZ" src="https://github.com/user-attachments/assets/ce4f533d-a5fd-4a05-a11f-0764234734d6" />
 
-
-### 🎯 Phân tích hệ quả cấu trúc RAM:
-
-* Chỉ số cờ bảo vệ cũ hiển thị giá trị **`0x4`** (tương ứng với hằng số thuộc tính `PAGE_READWRITE` của cấu trúc Windows API), minh chứng vùng nhớ ban đầu được khởi tạo ở trạng thái phẳng sạch, ngụy trang hoàn hảo.
-* Lệnh lật cờ thực thi hoàn tất, trả về trạng thái mở khóa `RX` thành công. Ứng dụng Máy tính `calc.exe` bật bung hiên ngang tại runtime dưới danh nghĩa luồng phụ của Notepad, bẻ gãy hoàn toàn cơ chế trinh sát cờ `RWX` mập mờ kịch trần kịch khung!
 
 ---
