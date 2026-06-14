@@ -181,7 +181,7 @@ PS C:\Users\Admin\source\repos\Task6\PE22_Injection_Through_Fiber\x64\Release>
 ```
 
 ### Demo:
-<img width="1920" height="850" alt="devenv_QZ6CsbdJNn" src="https://github.com/user-attachments/assets/a8cb4f68-3fb4-4d71-8d89-61035335138b" />
+<img width="1920" height="600" alt="devenv_QZ6CsbdJNn" src="https://github.com/user-attachments/assets/a8cb4f68-3fb4-4d71-8d89-61035335138b" />
 
 
 ---
