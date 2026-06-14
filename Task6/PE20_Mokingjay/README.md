@@ -1,7 +1,7 @@
 
 ---
 
-# 📝 [PE 20] Mockingjay (Vulnerable RWX Module Abuse)
+# 📝 [PE 20] Mockingjay 
 
 ## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
@@ -237,7 +237,7 @@ PS C:\Users\Admin\source\repos\Task6\PE20_Mokingjay\x64\Release> C:\Users\Admin\
 ```
 
 ### Demo:
-<img width="1920" height="1000" alt="devenv_5a8F1vmaB0" src="https://github.com/user-attachments/assets/6658abd8-f16b-452b-a88d-4ce423ee4403" />
+<img width="1920" height="600" alt="devenv_5a8F1vmaB0" src="https://github.com/user-attachments/assets/6658abd8-f16b-452b-a88d-4ce423ee4403" />
 
 
 ---
