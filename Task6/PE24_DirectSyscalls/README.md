@@ -286,7 +286,7 @@ PS C:\Users\Admin\source\repos\Task6\PE24_DirectSyscalls\x64\Release> C:\Users\A
 ```
 
 ### Demo:
-<img width="1920" height="840" alt="devenv_3zdlCYiqkG" src="https://github.com/user-attachments/assets/95a8eb76-66e0-4d64-aa84-5d10714e61bc" />
+<img width="1920" height="600" alt="devenv_3zdlCYiqkG" src="https://github.com/user-attachments/assets/95a8eb76-66e0-4d64-aa84-5d10714e61bc" />
 
 
 
