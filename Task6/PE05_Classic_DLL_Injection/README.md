@@ -213,6 +213,9 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved) {
 
 ```
 
+<img width="1301" height="650" alt="image" src="https://github.com/user-attachments/assets/72a94efa-45ff-4b73-831f-2004f946fb6c" />
+
+
 ---
 
 ## 🎛️ 4. Cấu Hình Biên Dịch Dự Án (Build & Deployment)
