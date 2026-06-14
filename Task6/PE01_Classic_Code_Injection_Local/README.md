@@ -169,7 +169,7 @@ PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Relea
 * Ứng dụng Máy tính `calc.exe` được sinh ra độc lập tại runtime dưới dạng tiến trình con của Loader, chứng minh giải thuật thực thi mã Position-Independent Code hoàn thành xuất sắc kịch trần.
 
 ### Demo
-<img width="1920" height="1140" alt="devenv_kUlV9XS9yK" src="https://github.com/user-attachments/assets/2dbd0b4c-d764-42ef-b5f6-52a64b8ca1c1" />
+<img width="1920" height="1080" alt="devenv_kUlV9XS9yK" src="https://github.com/user-attachments/assets/2dbd0b4c-d764-42ef-b5f6-52a64b8ca1c1" />
 
 
 ---
