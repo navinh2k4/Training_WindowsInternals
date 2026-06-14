@@ -300,7 +300,7 @@ PS C:\Users\Admin\source\repos\Task6\PE21_DV_NEW\x64\Release> C:\Users\Admin\sou
 ```
 
 ### Demo:
-<img width="1920" height="900" alt="devenv_1ROLYMf01w" src="https://github.com/user-attachments/assets/f80b6b33-1bdf-454f-836d-9853da0b5f2c" />
+<img width="1920" height="600" alt="devenv_1ROLYMf01w" src="https://github.com/user-attachments/assets/f80b6b33-1bdf-454f-836d-9853da0b5f2c" />
 
 
 ---
