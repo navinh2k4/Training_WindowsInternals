@@ -37,8 +37,7 @@ Giải thuật của Lab PE 03 bẻ gãy hoàn toàn cấu trúc IAT truyền th
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn tuân thủ nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** kết hợp ma trận ẩn giấu chuỗi thô kịch trần bảo mật.
-
+### Classic_Code_Injection_API_Obfuscate.cpp:
 ```cpp
 #include <windows.h>
 #include <tlhelp32.h>
@@ -212,12 +211,8 @@ PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Relea
 ```
 
 ### Demo
-<img width="1920" height="1080" alt="devenv_jaQDjbU0dJ" src="https://github.com/user-attachments/assets/407a68dc-b2d5-4054-a40f-4512ad7ec70b" />
+<img width="1920" height="600" alt="devenv_jaQDjbU0dJ" src="https://github.com/user-attachments/assets/407a68dc-b2d5-4054-a40f-4512ad7ec70b" />
 
 
-### 🎯 Phân tích hệ quả RAM & Tĩnh:
-
-* Phân tích tệp tin sau xuất bản bằng lệnh `strings` hoặc công cụ `PEstudio` chứng minh **các từ khóa API hệ thống nhạy cảm hoàn toàn biến mất khỏi bảng Import Address Table (IAT)** nạp đĩa thô.
-* Logic Payload thực thi trơn tru, ứng dụng Máy tính `calc.exe` bật bung hiên ngang tại runtime, chứng minh giải thuật dựng chuỗi động trên CPU Stack Frame hoạt động chính xác tuyệt đối, bẻ gãy hoàn toàn các cảm biến trinh sát tĩnh kịch khung kịch nền!
 
 ---
