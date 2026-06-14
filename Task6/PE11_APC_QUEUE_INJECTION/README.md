@@ -1,4 +1,4 @@
-<img width="1920" height="1140" alt="devenv_jprqlcA5Fm" src="https://github.com/user-attachments/assets/40e3e5ad-7eda-4f20-a470-13deb26d0102" />
+
 ---
 
 # 📝 [PE 11] APC Injection (Early Bird Variant)
