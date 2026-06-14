@@ -234,12 +234,7 @@ PS C:\Users\Admin\source\repos\Task6\PE07_Reflective_DLL_Loading_Lagos_Island\x6
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_R6k0rr98K7" src="https://github.com/user-attachments/assets/3fd349b6-e425-4421-835b-e9b645bb5efd" />
+<img width="1920" height="600" alt="devenv_R6k0rr98K7" src="https://github.com/user-attachments/assets/3fd349b6-e425-4421-835b-e9b645bb5efd" />
 
-
-### 🎯 Phân tích hệ quả RAM:
-
-* Giải thuật thực thi hoàn tất mỹ mãn kịch trần. Tại thời điểm runtime này, nếu một giải pháp an ninh sử dụng giải thuật kiểm tra ngược mã máy các hàm Native API lọt lòng `ntdll.dll` của tiến trình, hệ thống phòng thủ sẽ ghi nhận **toàn bộ các byte bẫy Hook (lệnh `JMP`) đã bị xóa sổ hoàn toàn không còn dấu vết**, thay vào đó là các cấu trúc byte nguyên bản sạch bóng của Microsoft.
-* Tháp API lúc này đạt trạng thái phẳng sạch 100%, tạo tiền đề tối cao để Vinh có thể triệu hồi bất kỳ giải thuật cấp phát bộ nhớ ảo hay sinh luồng nhạy cảm nào ở các bài Lab nâng cao kế tiếp một cách hiên ngang, bẻ gãy hoàn toàn các cảm biến trinh sát động kịch trần kịch khung!
 
 ---
