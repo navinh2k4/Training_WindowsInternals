@@ -227,7 +227,7 @@ PS C:\Users\Admin\source\repos\Task6\PE16_Module_Stomping\x64\Release> C:\Users\
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_ZG45dx1OQq" src="https://github.com/user-attachments/assets/9a07c022-f5c4-4e18-bdea-1ffd3b6e891b" />
+<img width="1920" height="600" alt="devenv_ZG45dx1OQq" src="https://github.com/user-attachments/assets/9a07c022-f5c4-4e18-bdea-1ffd3b6e891b" />
 
 
 ---
