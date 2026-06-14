@@ -240,7 +240,7 @@ PS C:\Users\Admin\source\repos\Task6\PE23_NTAPI_Injection\x64\Release> C:\Users\
 ```
 
 ### Demo:
-<img width="1920" height="850" alt="devenv_wp2RJme5j0" src="https://github.com/user-attachments/assets/1493e349-f155-492e-9d73-3096749d8719" />
+<img width="1920" height="600" alt="devenv_wp2RJme5j0" src="https://github.com/user-attachments/assets/1493e349-f155-492e-9d73-3096749d8719" />
 
 
 ---
