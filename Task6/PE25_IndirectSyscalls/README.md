@@ -310,7 +310,7 @@ PS C:\Users\Admin\source\repos\Task6\PE25_IndirectSyscalls\x64\Release> C:\Users
 ```
 
 ### Demo:
-<img width="1920" height="540" alt="devenv_uMFwO6vZxJ" src="https://github.com/user-attachments/assets/f0af3749-6152-479a-8885-b1499f2764d9" />
+<img width="1920" height="600" alt="devenv_uMFwO6vZxJ" src="https://github.com/user-attachments/assets/f0af3749-6152-479a-8885-b1499f2764d9" />
 
 
 
