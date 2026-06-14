@@ -1,7 +1,7 @@
 
 ---
 
-# 📝 [PE 21] DV_NEW (DOS Header e_lfanew Structure Manipulation)
+# 📝 [PE 21] DV_NEW 
 
 ## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
@@ -231,7 +231,7 @@ int main() {
 ```
 
 ### DV_ASM_stubs.std.x64.asm:
-```asm
+```assembly
 .code
 
 ; Cong goi truc tiep NtCreateSection
