@@ -266,7 +266,7 @@ PS C:\Users\Admin\source\repos\Task6\PE19_NtCreateSection_MapViewOfSection\x64\R
 ```
 
 ### Demo:
-<img width="1920" height="1140" alt="devenv_EqVex1s1DL" src="https://github.com/user-attachments/assets/88fa1553-8915-4e04-bf3c-21e4932eb53f" />
+<img width="1920" height="600" alt="devenv_EqVex1s1DL" src="https://github.com/user-attachments/assets/88fa1553-8915-4e04-bf3c-21e4932eb53f" />
 
 
 ---
