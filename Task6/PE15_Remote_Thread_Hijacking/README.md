@@ -286,7 +286,7 @@ PS C:\Users\Admin\source\repos\Task6\PE15_Remote_Thread_Hijacking\x64\Release> C
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_5OZ7tVRslO" src="https://github.com/user-attachments/assets/6837fdd3-1cb9-44f4-9a48-7eb4c77ed112" />
+<img width="1920" height="600" alt="devenv_5OZ7tVRslO" src="https://github.com/user-attachments/assets/6837fdd3-1cb9-44f4-9a48-7eb4c77ed112" />
 
 ---
 
