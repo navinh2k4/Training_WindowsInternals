@@ -212,7 +212,7 @@ PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Relea
 ```
 
 ### Demo
-<img width="1920" height="1140" alt="devenv_jaQDjbU0dJ" src="https://github.com/user-attachments/assets/407a68dc-b2d5-4054-a40f-4512ad7ec70b" />
+<img width="1920" height="1080" alt="devenv_jaQDjbU0dJ" src="https://github.com/user-attachments/assets/407a68dc-b2d5-4054-a40f-4512ad7ec70b" />
 
 
 ### 🎯 Phân tích hệ quả RAM & Tĩnh:
