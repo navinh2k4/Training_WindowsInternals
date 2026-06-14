@@ -1,0 +1,66 @@
+#pragma once
+
+// Nạp thư viện hệ thống để kế thừa các cấu trúc nhị phân chuẩn của Microsoft
+#include <windows.h>
+
+// Định nghĩa kiểu dữ liệu 64-bit thô 
+typedef unsigned long long QWORD;
+
+// Khai báo các hằng số Signature và Data Directory 
+#define ___IMAGE_NT_OPTIONAL_HDR32_MAGIC       0x10b
+#define ___IMAGE_NT_OPTIONAL_HDR64_MAGIC       0x20b
+#define ___IMAGE_NUMBEROF_DIRECTORY_ENTRIES    16
+#define ___IMAGE_DOS_SIGNATURE                 0x5A4D
+
+#define ___IMAGE_DIRECTORY_ENTRY_EXPORT          0
+#define ___IMAGE_DIRECTORY_ENTRY_IMPORT          1
+#define ___IMAGE_DIRECTORY_ENTRY_RESOURCE        2
+#define ___IMAGE_DIRECTORY_ENTRY_EXCEPTION       3
+#define ___IMAGE_DIRECTORY_ENTRY_SECURITY        4
+#define ___IMAGE_DIRECTORY_ENTRY_BASERELOC       5
+#define ___IMAGE_DIRECTORY_ENTRY_DEBUG           6
+#define ___IMAGE_DIRECTORY_ENTRY_ARCHITECTURE    7
+#define ___IMAGE_DIRECTORY_ENTRY_GLOBALPTR       8
+#define ___IMAGE_DIRECTORY_ENTRY_TLS             9
+#define ___IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG    10
+#define ___IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT   11
+#define ___IMAGE_DIRECTORY_ENTRY_IAT            12
+#define ___IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT   13
+#define ___IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR 14
+
+#define ___IMAGE_SIZEOF_SHORT_NAME              8
+#define ___IMAGE_SIZEOF_SECTION_HEADER          40
+
+// Đồng bộ hóa các kiểu dữ liệu cấu trúc thô thừa hưởng trực tiếp từ Windows SDK
+typedef IMAGE_DOS_HEADER            ___IMAGE_DOS_HEADER;
+typedef PIMAGE_DOS_HEADER           ___PIMAGE_DOS_HEADER;
+
+typedef IMAGE_DATA_DIRECTORY        ___IMAGE_DATA_DIRECTORY;
+typedef PIMAGE_DATA_DIRECTORY       ___PIMAGE_DATA_DIRECTORY;
+
+typedef IMAGE_OPTIONAL_HEADER32     ___IMAGE_OPTIONAL_HEADER32;
+typedef PIMAGE_OPTIONAL_HEADER32    ___PIMAGE_PIMAGE_OPTIONAL_HEADER32;
+
+typedef IMAGE_OPTIONAL_HEADER64     ___IMAGE_OPTIONAL_HEADER64;
+typedef PIMAGE_OPTIONAL_HEADER64    ___PIMAGE_OPTIONAL_HEADER64;
+
+typedef IMAGE_FILE_HEADER           ___IMAGE_FILE_HEADER;
+typedef PIMAGE_FILE_HEADER          ___PIMAGE_FILE_HEADER;
+
+typedef IMAGE_NT_HEADERS64          ___IMAGE_NT_HEADERS64;
+typedef PIMAGE_NT_HEADERS64         ___PIMAGE_NT_HEADERS64;
+
+typedef IMAGE_NT_HEADERS32          ___IMAGE_NT_HEADERS32;
+typedef PIMAGE_NT_HEADERS32         ___PIMAGE_NT_HEADERS32;
+
+typedef IMAGE_IMPORT_DESCRIPTOR     ___IMAGE_IMPORT_DESCRIPTOR;
+typedef PIMAGE_IMPORT_DESCRIPTOR    ___PIMAGE_IMPORT_DESCRIPTOR;
+
+typedef IMAGE_IMPORT_BY_NAME        ___IMAGE_IMPORT_BY_NAME;
+typedef PIMAGE_IMPORT_BY_NAME       ___PIMAGE_IMPORT_BY_NAME;
+
+typedef IMAGE_BASE_RELOCATION       ___IMAGE_BASE_RELOCATION;
+typedef PIMAGE_BASE_RELOCATION      ___PIMAGE_BASE_RELOCATION;
+
+typedef IMAGE_SECTION_HEADER        ___IMAGE_SECTION_HEADER;
+typedef PIMAGE_SECTION_HEADER       ___PIMAGE_SECTION_HEADER;

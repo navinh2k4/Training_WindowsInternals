@@ -1,0 +1,16 @@
+# Chặn các thư mục sinh ra khi build và cache của IDE
+.vs/
+x64/
+Debug/
+Release/
+
+# Chặn các file rác phát sinh cục bộ
+*.user
+*.suo
+*.ilk
+*.pdb
+*.idb
+*.iobj
+*.ipdb
+*.log
+*.recipe
