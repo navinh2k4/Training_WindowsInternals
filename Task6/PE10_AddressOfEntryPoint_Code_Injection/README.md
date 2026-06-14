@@ -45,8 +45,6 @@ $$\text{EntryPointAddress} = \text{ImageBaseAddress} + \text{ntHeaders.OptionalH
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa xác định cấu trúc thư mục hệ thống thực tế thông qua hàm `GetSystemDirectoryW` nhằm tối ưu hóa tính phòng thủ cấu trúc.
-
 ### Source.cpp: 
 ```cpp
 #include <windows.h>
@@ -269,12 +267,7 @@ PS C:\Users\Admin\source\repos\Task6\PE10_AddressOfEntryPoint_Code_Injection\x64
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_tGA4OwexAp" src="https://github.com/user-attachments/assets/85f9bc61-776f-4b43-b956-cf2ed38de4e6" />
+<img width="1920" height="600" alt="devenv_tGA4OwexAp" src="https://github.com/user-attachments/assets/85f9bc61-776f-4b43-b956-cf2ed38de4e6" />
 
-
-### 🎯 Phân tích hệ quả RAM:
-
-* Tiến trình được nạp mượt mà. Khi luồng chính được giải phóng khỏi trạng thái Suspended, CPU nạp lại ngữ cảnh thanh ghi, tịnh tiến con trỏ lệnh và lập tức dẫm trúng mìn JMP Patch đã được Loader cấu trúc ngay tại vạch xuất phát `AddressOfEntryPoint` Image-Native của Notepad.
-* Dòng chảy CPU bị bẻ hướng, kích nổ mở bung ứng dụng Máy tính **`calc.exe` hiên ngang rực rỡ kịch trần kịch khung** lọt lòng inside không gian bộ nhớ của Notepad. Do ta khôi phục lại thuộc tính bảo vệ trang nhớ của EntryPoint về `RX` nguyên thủy ngay sau khi ghi đè, cấu trúc RAM hoàn toàn phẳng sạch, qua mặt hoàn toàn các bộ quét phát hiện biến dạng cấu trúc của giải pháp an ninh một cách ngoạn mục!
 
 --- 
