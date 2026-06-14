@@ -40,79 +40,88 @@ Mã nguồn được thiết kế theo tiêu chuẩn phòng thủ cấu trúc: *
 #include <windows.h>
 #include <iostream>
 
-// Định nghĩa nguyên mẫu con trỏ hàm động để hóa giải rào cản IAT tĩnh
+#pragma comment(lib, "user32.lib")
+
+// 1. Định nghĩa cấu trúc dữ liệu chứa tham số và con trỏ hàm tuyệt đối
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
-// Cấu trúc dữ liệu chứa con trỏ tuyệt đối hóa giải triệt để lỗi RIP-Relative Error
-typedef struct _LOCAL_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec sống trên RAM
-    char szCommand[32];       // Phân vùng chứa chuỗi lệnh thực thi chức năng nằm khít cấu trúc
-} LOCAL_DATA, *PLOCAL_DATA;
+typedef struct _THREAD_DATA {
+    fnWinExec pWinExec;       // Lưu địa chỉ tuyệt đối của hàm WinExec
+    char szCommand[32];       // Lưu chuỗi lệnh thực thi
+} THREAD_DATA, * PTHREAD_DATA;
 
-// Hàm chức năng độc lập vị trí (PIC) gánh logic thực thi kịch khung
-DWORD WINAPI LocalPayload(LPVOID lpParam) {
-    PLOCAL_DATA pData = (PLOCAL_DATA)lpParam;
+// 2. Hàm thực thi luồng sử dụng dữ liệu được truyền vào thông qua tham số lpParam
+// Hàm này được thiết kế theo cấu trúc độc lập vị trí hoàn toàn
+DWORD WINAPI LaunchCalculator(LPVOID lpParam) {
+    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
-        // Thực thi logic thông qua lệnh gọi con trỏ gián tiếp, độc lập với vị trí nạp RAM
-        pData->pWinExec(pData->szCommand, SW_SHOWNORMAL);
+        // Gọi hàm thông qua con trỏ địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi RIP-Relative
+        pData->pWinExec(pData->szCommand, SW_HIDE);
     }
     return 0;
 }
 
+// Hàm giả lập tính toán kích thước gần đúng của logic thực thi
+SIZE_T GetFunctionSize() {
+    return 500;
+}
+
 int main() {
     std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 01: CLASSIC LOCAL PROCESS CODE INJECTION" << std::endl;
+    std::cout << "[*] PE 01: CLASSIC CODE INJECTION LOCAL (CALC.EXE)" << std::endl;
     std::cout << "====================================================" << std::endl;
 
-    SIZE_T functionSize = 500;
+    SIZE_T functionSize = GetFunctionSize();
 
-    // 1. Phân bổ trang bộ nhớ ảo mang thuộc tính thực thi thực tế (RWX) cục bộ
-    std::cout << "[*] Dang yeu cau OS cap phat trang nho RWX cuc bo..." << std::endl;
+    // 1. Cấp phát vùng nhớ động RWX tại tiến trình cục bộ để chứa mã máy của hàm
     LPVOID localCodeBuffer = VirtualAlloc(NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!localCodeBuffer) {
-        std::cerr << "[-] VirtualAlloc failed! Error Code: " << GetLastError() << std::endl;
+        std::cerr << "[-] VirtualAlloc cap phat bo nho that bai!" << std::endl;
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Trang nho Code RWX thiet lap tai: 0x" << std::hex << localCodeBuffer << std::endl;
+    std::cout << "[+] Vung nho Code mang quyen RWX tai dia chi: 0x" << std::hex << localCodeBuffer << std::endl;
 
-    // 2. Phân bổ trang nhớ mang quyền Đọc/Ghi (RW) cho cấu trúc bảng dữ liệu tuyệt đối
-    PLOCAL_DATA pLocalData = (PLOCAL_DATA)VirtualAlloc(NULL, sizeof(LOCAL_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // 2. Cấp phát vùng nhớ động RW cho cấu trúc dữ liệu tham số
+    PTHREAD_DATA pLocalData = (PTHREAD_DATA)VirtualAlloc(NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pLocalData) {
         VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
         return EXIT_FAILURE;
     }
 
-    // Phân giải động tọa độ runtime thực tế của hàm API từ Export Address Table (EAT) của Kernel32
+    // 3. Khởi tạo dữ liệu tuyệt đối cho cấu trúc tham số
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
         pLocalData->pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
     }
     strcpy_s(pLocalData->szCommand, "cmd.exe /c start calc");
 
-    // 3. Ánh xạ logic mã máy phẳng và tham số dữ liệu lên không gian ảo cục bộ
-    RtlCopyMemory(localCodeBuffer, (LPVOID)LocalPayload, functionSize);
-    std::cout << "[+] Anh xa logic ma may vao trang thuc thi hoan tat." << std::endl;
+    // 4. Sao chép thân hàm thực thi vào phân vùng mã máy RWX
+    RtlCopyMemory(localCodeBuffer, (LPVOID)LaunchCalculator, functionSize);
+    std::cout << "[+] Sao chep logic ham va khoi tao du lieu tuyet doi hoan tat." << std::endl;
 
-    // 4. Triệu hồi luồng nội bộ khai hỏa chức năng của Payload
-    std::cout << "[*] Dang khoi tao luong CreateThread de khai hoa..." << std::endl;
+    std::cout << "[*] Dang khoi tao luong Thread de thuc thi..." << std::endl;
+
+    // 5. Tạo luồng Thread, truyền phân vùng mã máy làm điểm chạy và pLocalData làm tham số đầu vào
     HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)localCodeBuffer, pLocalData, 0, NULL);
-    
-    if (hThread) {
-        // Đồng bộ hóa luồng nhằm đảm bảo tiến trình cha gánh luồng xử lý dứt điểm phẳng sạch
-        WaitForSingleObject(hThread, INFINITE); 
-        std::cout << "[+] Local Code Real-time Injection Successful!" << std::endl;
-        CloseHandle(hThread);
-    } else {
-        std::cerr << "[-] CreateThread that bai! Error Code: " << GetLastError() << std::endl;
+    if (!hThread) {
+        std::cerr << "[-] CreateThread that bai!" << std::endl;
+        VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
+        VirtualFree(pLocalData, 0, MEM_RELEASE);
+        return EXIT_FAILURE;
     }
 
-    // 5. Thu hồi và giải phóng triệt để các trang bộ nhớ ảo nhằm triệt tiêu rò rỉ tài nguyên (Memory Leak)
+    // Đợi luồng hoàn thành chu kỳ xử lý mở Máy tính
+    WaitForSingleObject(hThread, INFINITE);
+    std::cout << "[+] Luong Thread cuc bo da hoan thanh chu ky song." << std::endl;
+
+    // 6. Thu hồi tài nguyên và giải phóng triệt để vùng nhớ ảo
+    CloseHandle(hThread);
     VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
     VirtualFree(pLocalData, 0, MEM_RELEASE);
-    std::cout << "[+] Quy trinh giai phong vung nho ao hoan tat." << std::endl;
+    std::cout << "[+] Quy trinh giai phong RAM hoan tat." << std::endl;
 
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
+    MessageBoxA(NULL, "[+] PE 01: Local Injection with Absolute Pointers Successful!", "Success Status", MB_OK | MB_ICONINFORMATION);
+
     return EXIT_SUCCESS;
 }
 
@@ -141,27 +150,26 @@ int main() {
 Kiểm thử tệp nhị phân bằng công cụ PowerShell trực tiếp ngoài đĩa thô, dòng chảy lệnh được Kernel xử lý thẳng và kết xuất kết quả định dạng toán học trực quan ra màn hình CLI:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE01_Local_Injection.exe
+PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Release> C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Release\Classic_Code_Injection_Local.exe
 ====================================================
-[*] PE 01: CLASSIC LOCAL PROCESS CODE INJECTION
+[*] PE 01: CLASSIC CODE INJECTION LOCAL (CALC.EXE)
 ====================================================
-[*] Dang yeu cau OS cap phat trang nho RWX cuc bo...
-[+] Trang nho Code RWX thiet lap tai: 0x000001A24B7F0000
-[+] Anh xa logic ma may vao trang thuc thi hoan tat.
-[*] Dang khoi tao luong CreateThread de khai hoa...
-[+] Local Code Real-time Injection Successful!
-[+] Quy trinh giai phong vung nho ao hoan tat.
-
-[*] Hoan thanh quy trinh. Nhan Enter de dong cua so...
+[+] Vung nho Code mang quyen RWX tai dia chi: 0x000001B1077F0000
+[+] Sao chep logic ham va khoi tao du lieu tuyet doi hoan tat.
+[*] Dang khoi tao luong Thread de thuc thi...
+[+] Luong Thread cuc bo da hoan thanh chu ky song.
+[+] Quy trinh giai phong RAM hoan tat.
+PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Release>
 
 ```
-
-> **Vị trí đặt ảnh minh chứng thực nghiệm kích hoạt logic Payload:**
-> 
 
 ### 🎯 Phân tích hệ quả bộ nhớ:
 
 * Khối mã máy được đưa vào trang bộ nhớ xác định, bẻ gãy hoàn toàn các hàng rào Import Table tĩnh.
 * Ứng dụng Máy tính `calc.exe` được sinh ra độc lập tại runtime dưới dạng tiến trình con của Loader, chứng minh giải thuật thực thi mã Position-Independent Code hoàn thành xuất sắc kịch trần.
+
+### Demo
+<img width="1920" height="1140" alt="devenv_kUlV9XS9yK" src="https://github.com/user-attachments/assets/2dbd0b4c-d764-42ef-b5f6-52a64b8ca1c1" />
+
 
 ---
