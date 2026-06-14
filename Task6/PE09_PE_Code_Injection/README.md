@@ -49,8 +49,6 @@ Ta gọi hàm `CreateRemoteThread` (hoặc luồng ngầm Native Subsystem `NtCr
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa đo đạc, bóc tách cấu trúc PE Header để tái cấu trúc bản đồ bộ nhớ chéo tiến trình phẳng sạch kịch trần bảo mật.
-
 ### Source.cpp:
 ```cpp
 #include <windows.h>
@@ -217,12 +215,6 @@ PS C:\Users\Admin\source\repos\Task6\PE09_PE_Code_Injection\x64\Release> C:\User
 ```
 
 ### Demo: 
-<img width="1920" height="1080" alt="devenv_MMWbT4YRCD" src="https://github.com/user-attachments/assets/958bfc4c-d309-46c0-bbeb-9bf17e3c4b8a" />
-
-
-### 🎯 Phân tích hệ quả cấu trúc bộ nhớ:
-
-* Giải thuật thực thi hoàn tất thành công rực rỡ. Toàn bộ logic cấu trúc phức tạp của file PE ký sinh (bao gồm cả phân hệ quản lý tài nguyên dữ liệu và các hàm giao tiếp luồng nội bộ) được Windows Kernel tiếp nhận và xử lý mượt mà ngay lọt lòng inside tiến trình `notepad.exe`.
-* Khi tiến hành phân tích và kiểm thử bộ nhớ ảo ảo hóa của Notepad, mô-đun PE ký sinh hoạt động ngầm hoàn toàn độc lập dưới danh nghĩa và Token bảo mật hợp pháp của ứng dụng gốc, bypass hoàn toàn các bộ trinh sát hành vi dựa trên chữ ký tiêm Shellcode truyền thống.
+<img width="1920" height="600" alt="devenv_MMWbT4YRCD" src="https://github.com/user-attachments/assets/958bfc4c-d309-46c0-bbeb-9bf17e3c4b8a" />
 
 ---
