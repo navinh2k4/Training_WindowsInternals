@@ -301,7 +301,7 @@ PS C:\Users\Admin\source\repos\Task6\PE17_PEB_Walk_Injection\x64\Release> C:\Use
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_ChTjxI792u" src="https://github.com/user-attachments/assets/a5f01311-e4c0-4a72-964f-c2d3e860ff0e" />
+<img width="1920" height="600" alt="devenv_ChTjxI792u" src="https://github.com/user-attachments/assets/a5f01311-e4c0-4a72-964f-c2d3e860ff0e" />
 
 ---
 
