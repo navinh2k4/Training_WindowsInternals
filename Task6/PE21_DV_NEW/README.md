@@ -22,8 +22,6 @@ Dự án PE 21 hóa giải hàng rào an ninh bằng chiến thuật **Đại ph
 
 Khi hệ điều hành Windows OS hoặc các phân hệ quét bộ nhớ ảo của EDR Engine thực hiện bóc tách, rà soát cấu trúc PE (Portable Executable) của một tiến trình đang vận hành, chúng bắt buộc phải áp dụng quy chuẩn toán học ánh xạ con trỏ sau để định vị chính xác phân đoạn chỉ huy `IMAGE_NT_HEADERS`:
 
-$$\texttt{pNtHeaders} = \texttt{(PIMAGE\_NT\_HEADERS)}\left( \texttt{ImageBase} + \texttt{pDosHeader}\rightarrow\texttt{e\_lfanew} \right)$$
-
 Giải thuật của dự án PE 21 bẻ gãy và thao túng hoàn toàn công thức định vị hạ tầng này qua 4 giai đoạn ngầm tuyến tính tại không gian ảo của bộ nhớ:
 
 ```
@@ -35,8 +33,6 @@ Giải thuật của dự án PE 21 bẻ gãy và thao túng hoàn toàn công t
 
 1. **Khởi tạo ma trận PE ngụy trang**: Loader triệu hồi API hệ thống `VirtualAllocEx` để phân bổ một trang bộ nhớ ảo chéo tiến trình (Cross-Process Memory Allocation) mang thuộc tính đặc quyền kịch trần `PAGE_EXECUTE_READWRITE` (RWX) lọt lòng tiến trình đích. Tại phân vùng ảo này, Loader nhân bản toàn vẹn cấu trúc `IMAGE_NT_HEADERS64` nguyên bản của `notepad.exe`, nhưng can thiệp tinh chỉnh trường dữ liệu thực thi tối cao `OptionalHeader.AddressOfEntryPoint` trỏ thẳng vào tọa độ của khối mã máy độc lập vị trí (Position-Independent Code - PIC Payload).
 2. **Phẫu thuật bẻ hướng cấu trúc (e_lfanew Patching)**: Để cưỡng bách hệ thống và các bộ quét bảo mật phải thừa nhận cấu trúc NT Header giả mạo, Loader sử dụng hàm `WriteProcessMemory` can thiệp trực tiếp vào địa chỉ `ImageBase + 0x3C` (vị trí lưu trữ trường chỉ mục toán học `e_lfanew` thuộc DOS Header nguyên bản của Notepad). Giá trị dịch chuyển (Offset) mới được tính toán động dựa trên phép toán bù trừ khoảng cách tuyến tính giữa hai phân vùng không gian địa chỉ ảo:
-
-$$\text{New\_e\_lfanew} = \text{RemoteFakeNtHeaderAddress} - \text{ImageBase}$$
 
 Do toàn bộ các phân hệ giám sát bộ nhớ (Memory Scanners) của EDR đều tin cậy vào trường chỉ mục `e_lfanew` gốc để duyệt tìm cấu trúc thực thi của tệp tin nhị phân, việc vá lại trường dữ liệu này khiến EDR hoàn toàn bị mù bẫy thông tin, chỉ thực hiện rà quét phân vùng NT Header ngụy trang mà Loader đã dựng sẵn, tạo tiền đề cho chiến dịch kích nổ luồng chạy.
 
