@@ -281,13 +281,7 @@ PS C:\Users\Admin\source\repos\Task6\PE13_RWX_Hunting_Injection\x64\Release> C:\
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_Xe6OrnvjeS" src="https://github.com/user-attachments/assets/4386e7ff-15dd-412e-80b4-ca4d13621431" />
-
-
-### 🎯 Phân tích hệ quả cấu trúc bộ nhớ:
-
-* Giải thuật thực thi hoàn tất mỹ mãn. Loader dò tìm và trích xuất trúng tọa độ hốc trống rảnh đang sống của đối phương tại địa chỉ **`0x000000839E3C9000`** thuộc vùng nhớ `MEM_PRIVATE`.
-* Gài Payload cấu trúc tuyệt đối vào ký sinh, ứng dụng Máy tính `calc.exe` bật mở hiên ngang rực rỡ kịch trần kịch khung. Nhờ cơ chế triệu hồi `ExitThread` gián tiếp từ xa, luồng ký sinh tự giải phóng êm đẹp mà không gây ra bất kỳ xung đột tháp ngăn xếp nào, tiến trình Notepad hoàn toàn bình an vô sự và hoạt động song song mượt mà!
+<img width="1920" height="600" alt="devenv_Xe6OrnvjeS" src="https://github.com/user-attachments/assets/4386e7ff-15dd-412e-80b4-ca4d13621431" />
 
 ---
 
