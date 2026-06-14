@@ -283,6 +283,24 @@ int main() {
 
 ```
 
+### data.h:
+```cpp
+#pragma once
+#include <Windows.h>
+
+typedef struct BASE_RELOCATION_BLOCK {
+    DWORD PageAddress;
+    DWORD BlockSize;
+} BASE_RELOCATION_BLOCK, * PBASE_RELOCATION_BLOCK;
+
+typedef struct BASE_RELOCATION_ENTRY {
+    USHORT Offset : 12;
+    USHORT Type : 4;
+} BASE_RELOCATION_ENTRY, * PBASE_RELOCATION_ENTRY;
+
+using DLLEntry = BOOL(WINAPI*)(HINSTANCE dll, DWORD reason, LPVOID reserved);
+```
+
 ### dllmain.cpp:
 ```cpp
 #include "pch.h"
@@ -382,12 +400,6 @@ PS C:\Users\Admin\source\repos\Task6\PE06_Reflective_DLL_Injection\x64\Release>C
 ```
 
 ### Demo
-<img width="1920" height="1080" alt="devenv_67R8Zjb7DL" src="https://github.com/user-attachments/assets/21313e99-4406-4ef5-b30b-f614a66a2cf8" />
-
-
-### 🎯 Phân tích hệ quả cấu trúc RAM:
-
-* Kích hoạt logic thành công, ứng dụng Máy tính **`calc.exe` bật bung mở ra hiên ngang rực rỡ kịch trần kịch khung**!
-* Tại thời điểm runtime này, nếu Blue Team sử dụng các công cụ theo dõi ghi nhận tệp tin cấp thấp (như `Procmon`), hệ thống sẽ hoàn toàn **không ghi nhận bất kỳ sự kiện nạp tệp tin DLL nào từ đĩa cứng (Disk I/O)** liên quan đến `Reflective_Payload.dll`. Thư viện đã tự nạp, tự vá cấu trúc và vận hành phẳng sạch lọt lòng inside RAM một cách vô ảnh vô hình, đánh dấu cột mốc làm chủ kỹ thuật Fileless kịch trần công nghệ!
+<img width="1920" height="600" alt="devenv_67R8Zjb7DL" src="https://github.com/user-attachments/assets/21313e99-4406-4ef5-b30b-f614a66a2cf8" />
 
 ---
