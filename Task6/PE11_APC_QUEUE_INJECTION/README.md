@@ -41,8 +41,6 @@ Quy trình toán học điều phối dòng chảy CPU của Lab PE 11 diễn ra
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa đo đạc phân vùng hệ thống thông qua `GetSystemDirectoryW`, bảo đảm tính tương thích và phòng thủ cấu trúc tuyệt đối trên mọi phiên bản Windows 11.
-
 ### Source.cpp
 ```cpp
 #include <windows.h>
@@ -224,13 +222,8 @@ PS C:\Users\Admin\source\repos\Task6\PE11_APC_QUEUE_INJECTION\x64\Release> C:\Us
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_jprqlcA5Fm" src="https://github.com/user-attachments/assets/d901e6c0-96bb-4d7c-9008-9991cbefdc5e" />
+<img width="1920" height="600" alt="devenv_jprqlcA5Fm" src="https://github.com/user-attachments/assets/d901e6c0-96bb-4d7c-9008-9991cbefdc5e" />
 
-
-### 🎯 Phân tích hệ quả cấu trúc RAM:
-
-* Khi lệnh rã đông `ResumeThread` được phát ra, luồng hệ thống chuyển trạng thái ngữ cảnh. Kernel Windows phát hiện danh sách thông điệp APC tồn đọng trong cấu trúc luồng, lập tức bốc tọa độ `remoteCodeBuffer` lên CPU thực thi trước khi chuyển giao quyền kiểm soát về User-mode tại điểm EntryPoint gốc.
-* Ứng dụng Máy tính **`calc.exe` được kích nổ mở bung hiên ngang rực rỡ kịch trần kịch khung** lọt lòng inside không gian bộ nhớ ảo của Notepad. Hành vi này hoàn toàn mượt mà, không sinh luồng phụ bất thường, đi trước tốc độ thiết lập hàng rào của các phần mềm an ninh, bypass hoàn toàn các bộ lọc Hooking truyền thống một cách mỹ mãn!
 
 ---
 
