@@ -231,13 +231,8 @@ PS C:\Users\Admin\source\repos\Task6\PE14_Process_Ghosting\x64\Release> C:\Users
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_Jdv2l27u1D" src="https://github.com/user-attachments/assets/b06ad31f-1b1a-49e7-8ce3-560b466a7ba0" />
+<img width="1920" height="600" alt="devenv_Jdv2l27u1D" src="https://github.com/user-attachments/assets/b06ad31f-1b1a-49e7-8ce3-560b466a7ba0" />
 
-
-### 🎯 Phân tích hệ quả cấu trúc bộ nhớ:
-
-* Thuật toán thực thi hoàn tất mỹ mãn kịch trần. Tại thời điểm tiến trình bóng ma đang hoạt động ký sinh trên bộ nhớ RAM, nếu một chuyên gia Blue Team sử dụng các công cụ rà quét hoặc lệnh truy vấn thuộc tính đường dẫn Image Path của tiến trình này, hệ điều hành Windows Subsystem sẽ trả về mã lỗi **`File Not Found` (Tệp tin không tồn tại trên ổ đĩa)**.
-* Do tệp thô đã bị xóa sổ khỏi bảng mục lục MFT ngay từ pha khởi tạo Section, cơ chế Real-time File Scanning của AV/EDR hoàn toàn bị bẻ gãy 100%, bộc lộ khả năng ẩn mình kịch trần kịch khung của giải thuật bộ nhớ nâng cao!
 
 ---
 
