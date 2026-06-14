@@ -34,8 +34,7 @@ Trong điều kiện vận hành thông thường của một tiến trình Wind
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn được thiết kế theo tiêu chuẩn phòng thủ cấu trúc: **Cấp phát động thích ứng (Zero Static Buffers)** để triệt tiêu hoàn toàn các lỗ hổng tràn bộ đệm tĩnh, kết hợp giải thuật **Bảo toàn ngữ cảnh tháp luồng (Thread Context Preservation)**.
-
+### Source.cpp:
 ```cpp
 #include <windows.h>
 #include <iostream>
@@ -137,10 +136,6 @@ int main() {
 
 1. Chuyển đổi công cụ quản lý cấu hình dự án sang chế độ chuyên thu mục **`Release`** và kiến trúc nền tảng **`x64`**.
 2. Truy cập mục: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số `Runtime Library`, chuyển đổi cấu hình sang cờ **`Multi-threaded (/MT)`** nhằm liên kết tĩnh (Static Linkage) toàn bộ thư viện hệ thống lọt lòng file thực thi `.exe`.
-
-> **Vị trí đặt ảnh minh chứng cấu hình biên dịch hệ thống:**
-> 
-
 3. Thực hiện thao tác chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`**. Tệp `.exe` độc lập sẽ được kết xuất tại thư mục đầu ra `x64\Release\`.
 
 ---
@@ -163,13 +158,7 @@ PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Relea
 
 ```
 
-### 🎯 Phân tích hệ quả bộ nhớ:
-
-* Khối mã máy được đưa vào trang bộ nhớ xác định, bẻ gãy hoàn toàn các hàng rào Import Table tĩnh.
-* Ứng dụng Máy tính `calc.exe` được sinh ra độc lập tại runtime dưới dạng tiến trình con của Loader, chứng minh giải thuật thực thi mã Position-Independent Code hoàn thành xuất sắc kịch trần.
-
 ### Demo
-<img width="1920" height="1080" alt="devenv_kUlV9XS9yK" src="https://github.com/user-attachments/assets/2dbd0b4c-d764-42ef-b5f6-52a64b8ca1c1" />
-
+<img width="1920" height="600" alt="devenv_kUlV9XS9yK" src="https://github.com/user-attachments/assets/2dbd0b4c-d764-42ef-b5f6-52a64b8ca1c1" />
 
 ---
