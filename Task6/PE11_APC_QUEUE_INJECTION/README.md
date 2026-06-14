@@ -3,40 +3,45 @@
 
 # 📝 [PE 11] APC Injection (Early Bird Variant)
 
-## 📌 1. Tổng Quan Kỹ Thuật (Overview)
+## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
-**APC Injection** (biến thể *Early Bird*) là giải thuật né tránh phòng thủ động (Dynamic Evasion) cực kỳ thông minh ở tầng hệ thống.
+**APC Injection (Biến thể Early Bird)** đại diện cho một giải thuật tiêm nhiễm mã máy bất đồng bộ ở mức độ nâng cao, thuộc nhóm kỹ thuật **Né tránh phòng thủ động tại thời điểm sơ khởi tiến trình (Process Initialization Evasion)**.
 
-Khi một tiến trình tạo ra một luồng phụ hoặc luồng lạ hoạt động bất thường, hành vi đó dễ lọt vào mắt bão trinh sát của EDR. Lab PE 11 hóa giải bài toán này bằng cách sử dụng cơ chế **Asynchronous Procedure Call (APC)** có sẵn của Windows OS. Ta gài mã máy vào hàng đợi thông điệp thực thi của luồng chính ngay khi tiến trình vỏ bọc (ví dụ: `notepad.exe`) vừa được sinh ra ở trạng thái đóng băng (`CREATE_SUSPENDED`). Ngay lúc luồng được rã đông, Kernel Windows sẽ tự động triệu hồi hàng đợi APC ra thực thi trước tiên, cho phép Payload kích nổ ngay tại thời điểm khởi thủy của tiến trình với độ ẩn mình tối cao.
+Hầu hết các giải pháp Endpoint Detection and Response (EDR) hiện đại đều thiết lập các hàm móc (User-mode Hooks) bằng cách nạp DLL giám sát của họ vào bên trong các tiến trình mới sinh nhằm theo dõi hành vi tạo luồng lạ (`CreateRemoteThread`). Dự án PE 11 hóa giải bài toán này bằng cách khai thác cơ chế **Asynchronous Procedure Call (APC)** mặc định của Windows Subsystem, phối hợp với trạng thái đóng băng tiến trình sơ khởi (`CREATE_SUSPENDED`).
+
+Bằng cách đưa Payload vào hàng đợi APC của luồng chính ngay khi cấu trúc tiến trình vừa được hình thành, Loader ép Kernel hệ điều hành tự động triệu hồi và thực thi mã máy của ta **trước** khi điểm nhập thực tế (`AddressOfEntryPoint`) của ứng dụng được kích hoạt, đồng thời đi trước một bước trước khi các phân hệ giám sát của EDR kịp thiết lập hàng rào bảo vệ (Hooking Placement). Kỹ thuật này triệt tiêu hoàn toàn sự hiện diện của các API tạo luồng lộ liễu, mang lại độ ẩn mình tối cao cho Payload.
 
 ### 🎯 Mục tiêu nghiên cứu:
 
-* Làm chủ cơ chế hàng đợi bất đồng bộ Asynchronous Procedure Call (APC) trong Windows Internals.
-* Khai thác trạng thái sơ khởi của tiến trình để thực thi mã máy trước khi các phân hệ giám sát hành vi của EDR kịp chèn bộ lọc.
-* Ứng dụng quy trình tự động định vị vị trí thư mục hệ thống thực tế (**Active Path Custom**) để đạt độ linh hoạt kịch trần.
+* **Làm chủ cơ chế điều phối bất đồng bộ (APC Queue)**: Thấu suốt cách thức cấu trúc luồng của Windows quản lý và xử lý các hàm callback tồn đọng trong không gian ảo.
+* **Đánh chặn chu kỳ khởi thủy (Early-stage Execution)**: Thực nghiệm kiểm chứng việc chiếm quyền điều phối CPU tại thời điểm giao thoa giữa Kernel-mode initialization và User-mode execution.
 
 ---
 
-## 🔬 2. Giải Phẫu Cơ Chế Ngầm Của OS (Windows Internals)
+## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Mỗi một luồng (Thread) trong Windows OS sở hữu riêng một hàng đợi gọi là **APC Queue**. Khi luồng bước vào trạng thái có thể cảnh báo (Alertable State) hoặc khi luồng chính vừa mới thức dậy từ trạng thái `CREATE_SUSPENDED`, Kernel Windows sẽ quét hàng đợi này để xử lý các hàm tồn đọng.
+Trong kiến trúc hệ điều hành Windows, mỗi một luồng (Thread) được đại diện bởi một cấu trúc dữ liệu ở tầng Kernel và sở hữu riêng một hàng đợi gọi là **APC Queue**. Khi một luồng bước vào trạng thái có thể cảnh báo (Alertable State) hoặc khi luồng chính của một tiến trình chuẩn bị chuyển trạng thái từ đóng băng sang thực thi, Kernel Windows có trách nhiệm quét sạch hàng đợi này để xử lý các hàm xử lý bất đồng bộ được gửi từ trước.
 
-Quy trình toán học giải phẫu và điều hướng luồng của Lab PE 11 diễn ra qua các bước ngầm sau tại tầng Kernel:
-
-```
-[CreateProcessW: Trạng thái hoãn lệnh] ──> [VirtualAllocEx: Ánh xạ Payload PIC] ──> [QueueUserAPC: Gài mìn hàng đợi] ──> [ResumeThread: Kernel tự kích nổ]
+Quy trình toán học điều phối dòng chảy CPU của Lab PE 11 diễn ra qua 4 giai đoạn ngầm tại tầng Kernel:
 
 ```
+[CreateProcessW: Trạng thái đóng băng CREATE_SUSPENDED]
+       └──> [VirtualAllocEx: Ánh xạ cấu trúc mã máy Payload và tham số]
+                 └──> [QueueUserAPC: Gài cấu trúc APC chéo RAM vào hàng đợi luồng chính]
+                           └──> [ResumeThread: Kernel tự động kích nổ APC trước EntryPoint]
 
-1. **Khởi tạo chu kỳ sơ khởi (`CREATE_SUSPENDED`)**: Tiến trình vỏ bọc được nạp lên RAM ở dạng "xác rỗng". Luồng chính được tạo ra nhưng bị hoãn lệnh ngay tại vạch xuất phát của hệ thống. Lúc này, tiến trình chưa hề thực thi bất kỳ một byte mã máy nào của file thực thi gốc.
-2. **Gài mìn hàng đợi hệ thống (`QueueUserAPC`)**: Hàm này gửi yêu cầu xuống nhân Kernel để chèn một thực thể cấu trúc APC mới vào hàng đợi của luồng chính `pi.hThread`. Ta truyền con trỏ địa chỉ vùng nhớ thực thi từ xa `remoteCodeBuffer` làm thủ tục xử lý kế tiếp và truyền con trỏ vùng nhớ chứa cấu trúc tham số tuyệt đối `pRemoteData` làm tham số đầu vào.
-3. **Kích nổ tự động từ Kernel (`ResumeThread`)**: Khi Loader phát lệnh rã đông luồng, CPU không nhảy vào điểm EntryPoint gốc ngay. Hệ điều hành Windows phát hiện luồng chính có thông điệp APC đang xếp hàng chờ sẵn. Nó lập tức chuyển hướng con trỏ chỉ mục lệnh sang thực thi phân vùng mã máy của ta trước, hoàn thành dứt điểm chiến dịch Evasion.
+```
+
+1. **Khởi tạo chu kỳ sơ khởi (`CREATE_SUSPENDED`)**: Tiến trình vỏ bọc được nạp lên RAM dưới dạng một "xác rỗng" (Empty Shell). Luồng chính được khởi tạo nhưng bị hoãn lệnh ngay tại vạch xuất phát của hệ thống. Lúc này, không gian ảo của tiến trình hoàn toàn phẳng sạch, chưa hề thực thi bất kỳ một byte mã máy nào của file thực thi gốc hay mô-đun giám sát bên thứ ba.
+2. **Ánh xạ cấu trúc tham số tuyệt đối**: Do hàm callback APC trên kiến trúc x64 chỉ nhận duy nhất một tham số đầu vào (`ULONG_PTR`), Loader tiến hành đóng gói địa chỉ hàm API cần gọi và chuỗi lệnh thực thi vào một cấu trúc dữ liệu duy nhất (`THREAD_DATA`), ánh xạ song song mã máy và cấu trúc này sang bộ nhớ đối phương nhằm triệt tiêu lỗi địa chỉ tương đối RIP-Relative.
+3. **Gài mìn hàng đợi hệ thống (`QueueUserAPC`)**: Hàm API này phát lệnh xuống nhân Kernel để chèn một thực thể cấu trúc `KAPC` mới vào hàng đợi APC của luồng chính `pi.hThread`. Tham số `pfnAPC` được trỏ đến địa chỉ vùng nhớ thực thi từ xa `remoteCodeBuffer`, và tham số `dwData` được nạp tọa độ vùng nhớ chứa tham số tuyệt đối `pRemoteData`.
+4. **Kích nổ tự động từ tầng Kernel (`ResumeThread`)**: Khi Loader phát lệnh rã đông luồng, trình lập lịch (Scheduler) của Kernel Windows phát hiện luồng chính có thông điệp APC đang xếp hàng chờ sẵn. Trước khi trả quyền điều khiển về cho User-mode tại điểm EntryPoint gốc, Kernel lập tức điều hướng con trỏ chỉ mục lệnh CPU sang thực thi phân vùng mã máy của ta trước để giải phóng hàng đợi, hoàn thành dứt điểm chiến dịch Evasion.
 
 ---
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – tự động hóa tính toán thư mục hệ thống thực tế bằng `GetSystemDirectoryW` để đạt độ linh hoạt tối đa.
+Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa đo đạc phân vùng hệ thống thông qua `GetSystemDirectoryW`, bảo đảm tính tương thích và phòng thủ cấu trúc tuyệt đối trên mọi phiên bản Windows 11.
 
 ```cpp
 #include <windows.h>
@@ -45,19 +50,19 @@ Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – 
 #include <string>
 #include <vector>
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối gánh luồng xử lý độc lập vị trí
+// Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối gánh luồng xử lý độc lập vị trí
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
 typedef struct _THREAD_DATA {
     fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
+    char szCommand[32];       // Phân vùng chứa chuỗi lệnh thực thi chức năng nằm khít cấu trúc
 } THREAD_DATA, * PTHREAD_DATA;
 
-// 2. Hàm chức năng độc lập vị trí sẽ gánh luồng chạy khi APC kích nổ
+// Hàm chức năng độc lập vị trí (PIC) sẽ gánh luồng chạy khi APC được Kernel triệu hồi
 DWORD WINAPI RemoteApcPayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
-        // Khai hỏa bằng địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi RIP-Relative
+        // Khai hỏa thông qua địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi tương đối RIP
         pData->pWinExec(pData->szCommand, SW_HIDE);
     }
     return 0;
@@ -95,12 +100,12 @@ int main() {
     PROCESS_INFORMATION pi = { 0 };
     si.cb = sizeof(STARTUPINFOW);
 
-    // ─── BƯỚC 1: KHỞI TẠO TIẾN TRÌNH VỎ BỌC Ở TRẠNG THÁI ĐÓNG BĂNG ───
+    // ─── BƯỚC 1: KHỞI TẠO TIẾN TRÌNH VỎ BỌC Ở TRẠNG THÁI ĐÓNG BĂNG SƠ KHỞI ───
     std::cout << "[*] Dang khoi tao tien trinh vo boc o trang thai dong bang..." << std::endl;
     BOOL success = CreateProcessW(NULL, const_cast<LPWSTR>(dynamicPath.c_str()), NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
 
     if (!success) {
-        std::cerr << "[-] Failed to create suspended process. Error: " << GetLastError() << std::endl;
+        std::cerr << "[-] Failed to create suspended process. Error Code: " << GetLastError() << std::endl;
         return EXIT_FAILURE;
     }
     std::cout << "[+] Tien trinh vo boc duoc tao thanh cong! PID: " << pi.dwProcessId << " | ThreadID: " << pi.dwThreadId << std::endl;
@@ -154,7 +159,7 @@ int main() {
     std::cout << "[*] Nhan phim Enter de dong cua so..." << std::endl;
     std::cin.get();
 
-    // Thu hồi tài nguyên Handle hệ thống phẳng sạch chống rò rỉ bộ nhớ
+    // Thu hồi tài nguyên Handle hệ thống phẳng sạch chống rò rỉ bộ nhớ ảo
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return EXIT_SUCCESS;
@@ -164,19 +169,25 @@ int main() {
 
 ---
 
-## 🎛️ 4. Hướng Dẫn Cấu Hình Đóng Gói (Build & Deployment)
+## 🎛️ 4. Cấu Hình Biên Dịch Dự Án (Build & Deployment)
 
-### ⚙️ Thiết lập trên Microsoft Visual Studio:
+Để cấu trúc tệp tin thực thi đạt trạng thái độc lập tuyến tính, nhúng toàn vẹn thư viện liên kết động nhằm tối ưu hóa khả năng vận hành độc lập trên môi trường VM cô lập:
 
-1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ **`Release`** và kiến trúc nền tảng **`x64`**.
-2. Đi tới: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại mục `Runtime Library`, chuyển cấu hình thành **`Multi-threaded (/MT)`** để nhúng tĩnh thư viện hệ thống.
-3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân sạch bóng.
+### ⚙️ Thiết lập trên môi trường Microsoft Visual Studio:
+
+1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng **`x64`**.
+2. Đi tới cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thuộc tính `Runtime Library`, chuyển thông số sang cờ liên kết tĩnh **`Multi-threaded (/MT)`**.
+
+> **Vị trí đặt ảnh minh chứng cấu hình hệ thống:**
+> 
+
+3. Tiến hành thực hiện click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân chuẩn chỉ.
 
 ---
 
-## 📊 5. Kết Quả Kích Hoạt Thật Tế (Demonstration)
+## 📊 5. Thực Nghiệm Kích Hoạt Thực Tế (Demonstration)
 
-Khởi hỏa file chạy thông qua cửa sổ dòng lệnh PowerShell ngoài ổ đĩa thực tế để theo dõi tiến trình gài mìn bất đồng bộ:
+Khai hỏa file thực thi Loader thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm kiểm chứng thuật toán can thiệp hàng đợi bất đồng bộ:
 
 ```powershell
 PS C:\Workspace\x64\Release> .\PE11_Apc_Injection.exe
@@ -197,7 +208,21 @@ PS C:\Workspace\x64\Release> .\PE11_Apc_Injection.exe
 
 ```
 
-*🎯 Hệ quả RAM:* Luồng hệ thống thức dậy, Kernel phát hiện hàng đợi APC tồn đọng, tự động bốc Payload của ta lên CPU nổ tung mở Máy tính `calc.exe` hiên ngang rực rỡ kịch trần kịch khung!
+> **Vị trí đặt ảnh minh chứng thực nghiệm Early Bird APC Injection:**
+> 
+
+### 🎯 Phân tích hệ quả cấu trúc RAM:
+
+* Khi lệnh rã đông `ResumeThread` được phát ra, luồng hệ thống chuyển trạng thái ngữ cảnh. Kernel Windows phát hiện danh sách thông điệp APC tồn đọng trong cấu trúc luồng, lập tức bốc tọa độ `remoteCodeBuffer` lên CPU thực thi trước khi chuyển giao quyền kiểm soát về User-mode tại điểm EntryPoint gốc.
+* Ứng dụng Máy tính **`calc.exe` được kích nổ mở bung hiên ngang rực rỡ kịch trần kịch khung** lọt lòng inside không gian bộ nhớ ảo của Notepad. Hành vi này hoàn toàn mượt mà, không sinh luồng phụ bất thường, đi trước tốc độ thiết lập hàng rào của các phần mềm an ninh, bypass hoàn toàn các bộ lọc Hooking truyền thống một cách mỹ mãn!
 
 ---
 
+## 📚 6. Tài Liệu Tham Khảo (Technical References)
+
+* **Microsoft Learn**: *QueueUserAPC function (processthreadsapi.h)* - [https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc)
+* **Veritas**: *Asynchronous Procedure Calls (APCs) Internals* - [https://www.corelan.be/](https://www.corelan.be/)
+* **Mark Russinovich**: *Windows Internals, Part 1 (7th Edition)* - Chapter 3: System Mechanisms - Thread Scheduling and Dispatching.
+* **CyberBit Research**: *The "Early Bird" Code Injection Technique* - Analysis on EDR Bypassing.
+
+--- 

