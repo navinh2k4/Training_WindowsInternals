@@ -329,7 +329,7 @@ PS C:\Users\Admin\source\repos\Task6\PE18_PEB_Walk_APIs_Obfuscation\x64\Release>
 ```
 
 ### Demo:
-<img width="1920" height="1080" alt="devenv_LWtYBiKOxk" src="https://github.com/user-attachments/assets/cb42f2ed-004b-45fe-846c-40af77c719e7" />
+<img width="1920" height="600" alt="devenv_LWtYBiKOxk" src="https://github.com/user-attachments/assets/cb42f2ed-004b-45fe-846c-40af77c719e7" />
 
 
 ---
