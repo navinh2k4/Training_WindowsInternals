@@ -31,6 +31,9 @@ Quy trình toán học giải phẫu và ghi đè triệt tiêu ma trận Hook c
                            └──> [RtlCopyMemory: Ghi đè mã sạch, giải thoát tháp API]
 
 ```
+<br>
+<img width="1693" height="2766" alt="image" src="https://github.com/user-attachments/assets/39bbb76f-1291-4862-9c06-c8fd7760d07f" />
+
 
 1. **Đối chiếu bản đồ cấu trúc PE**: Loader sử dụng hàm `GetModuleHandleA` để trích xuất Base Address đang hoạt động của mô-đun `ntdll.dll` trên bộ nhớ ảo (nơi đã bị EDR ghi đè mã máy gài bẫy Hook). Đồng thời, ứng dụng sử dụng luồng đọc nhị phân hệ thống để kéo toàn bộ tệp tin vật lý `C:\Windows\System32\ntdll.dll` sạch từ ổ đĩa vào một cấu trúc mảng byte cục bộ (`std::vector`).
 2. **Tính toán tịnh tiến phân đoạn**: Giải thuật truy cập vào bảng danh sách phân đoạn (**Section Table**) dựa trên cấu trúc các bản ghi `IMAGE_SECTION_HEADER` của file đĩa thô nhằm săn tìm phân đoạn mang tên định danh **`.text`** (phân vùng chứa mã máy thực thi của toàn bộ Native API). Loader bốc tách hai thông số toán học cốt lõi: `VirtualAddress` (Địa chỉ tương đối RVA) và `Misc.VirtualSize` (Kích thước thực tế của vùng mã máy).
