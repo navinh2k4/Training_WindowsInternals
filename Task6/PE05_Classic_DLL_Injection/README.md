@@ -29,6 +29,10 @@ Quy trình toán học giải phẫu và ép nạp Image mô-đun chéo tiến t
                            └──> [CreateRemoteThread: Khai hỏa PE Loader từ xa]
 
 ```
+<br>
+<img width="564" height="780" alt="image" src="https://github.com/user-attachments/assets/c8899333-fe5d-48c4-9999-d20dae94d173" />
+
+
 
 1. **Khắc vạch ô chứa dữ liệu từ xa (`VirtualAllocEx`)**: Do hàm hệ thống `LoadLibraryW` yêu cầu tham số đầu vào là một con trỏ trỏ đến chuỗi ký tự Wide-character chứa đường dẫn của tệp DLL, Loader không thể truyền con trỏ cục bộ sang RAM đối phương do tính cô lập không gian địa chỉ ảo. Loader buộc phải sử dụng `VirtualAllocEx` để khởi tạo một trang nhớ mang cờ bảo vệ **`PAGE_READWRITE` (RW)** bên lòng tiến trình đích với kích thước vừa khít độ dài chuỗi ký tự.
 2. **Ánh xạ chuỗi đường dẫn (`WriteProcessMemory`)**: Ghi dữ liệu chuỗi đường dẫn tệp DLL vật lý 
