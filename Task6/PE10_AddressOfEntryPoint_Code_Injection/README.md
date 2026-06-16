@@ -31,6 +31,9 @@ Quy trình toán học giải phẫu ngữ cảnh và chiếm quyền điều ph
                            └──> [WriteProcessMemory: Vá mìn điều hướng Inline JMP Stub x64]
 
 ```
+<br>
+<img width="526" height="772" alt="image" src="https://github.com/user-attachments/assets/10f4131e-a974-42c2-b5a0-713cd4a9ca6c" />
+
 
 1. **Truy vết bản đồ địa chỉ nạp (`ImageBaseAddress`)**: Khi luồng chính (Main Thread) của tiến trình vỏ bọc bị hoãn lệnh sơ khởi (`CREATE_SUSPENDED`), hệ điều hành nạp địa chỉ trỏ đến cấu trúc quản lý **PEB** của nạn nhân vào thanh ghi phần cứng **`Rdx`** của CPU. Loader phát lệnh `ReadProcessMemory` bốc tách ô nhớ tại vị trí offset `0x10` của PEB để lấy chính xác tọa độ nạp thực tế ImageBaseAddress của Notepad trên RAM.
 2. **Toán học định vị tọa độ xuất phát tuyệt đối**: Loader đọc $4\text{ KB}$ phân đoạn PE Headers đầu tiên của nạn nhân sang một bộ đệm cục bộ, ép kiểu cấu trúc dữ liệu về bản ghi **`PIMAGE_NT_HEADERS64`** chuẩn chỉ x64 để tính toán ô nhớ đích theo công thức:
