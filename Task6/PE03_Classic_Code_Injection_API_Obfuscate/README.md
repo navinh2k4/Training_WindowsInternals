@@ -29,6 +29,10 @@ Giải thuật của Lab PE 03 bẻ gãy hoàn toàn cấu trúc IAT truyền th
 
 ```
 
+<br>
+<img width="536" height="775" alt="image" src="https://github.com/user-attachments/assets/de96a5e0-e3b2-4a11-bcde-992a1ad9e012" />
+
+
 1. **Khởi tạo chuỗi ẩn danh trên ngăn xếp (Stack-strings)**: Khai báo mảng ký tự rời rạc dưới dạng cấu trúc hốc mảng: `char vAllocName[] = { 'V','i','r','t','u','a','l','A','l','l','o','c','E','x',0 };`. Lúc này, trình biên dịch MSVC buộc phải sinh ra các lệnh hợp ngữ **`mov`** gán trực tiếp từng byte ký tự vào các ô nhớ thuộc Stack Frame của hàm `main` tại thời điểm runtime. Khi tệp tin PE nằm tĩnh trên ổ đĩa, chuỗi ký tự hoàn toàn biến mất, chỉ còn lại các lệnh mã máy nạp RAM rời rạc.
 2. **Xác định tọa độ Module gốc (`GetModuleHandleA`)**: Loader truyền mảng ký tự Stack-string đại diện cho `"kernel32.dll"` vào hàm tra cứu nhằm trích xuất địa chỉ Base Address sống của thư viện này trong không gian ảo cục bộ.
 3. **Phẫu thuật Export Address Table (EAT) động**: Loader đẩy lần lượt các mảng ký tự Stack-string chứa tên hàm hệ thống vào `GetProcAddress`. Hệ điều hành Windows lập tức giải phẫu cấu trúc danh bạ xuất bản hàm của `kernel32.dll` ngay trên RAM, tính toán tọa độ tuyệt đối và trả về địa chỉ ô nhớ chính xác để Loader gán vào các mẫu cấu trúc con trỏ hàm động (Dynamic Function Pointers), sẵn sàng kích nổ chéo tiến trình.
