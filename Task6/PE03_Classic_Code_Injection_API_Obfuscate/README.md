@@ -30,8 +30,7 @@ Giải thuật của Lab PE 03 bẻ gãy hoàn toàn cấu trúc IAT truyền th
 ```
 
 <br>
-<img width="1888" height="1352" alt="image" src="https://github.com/user-attachments/assets/3599dca7-554b-4a48-9618-a07776f29abd" />
-
+<img width="1331" height="2974" alt="image" src="https://github.com/user-attachments/assets/cb7a19b4-fb73-4126-bda0-cdb536b377f7" />
 
 
 1. **Khởi tạo chuỗi ẩn danh trên ngăn xếp (Stack-strings)**: Khai báo mảng ký tự rời rạc dưới dạng cấu trúc hốc mảng: `char vAllocName[] = { 'V','i','r','t','u','a','l','A','l','l','o','c','E','x',0 };`. Lúc này, trình biên dịch MSVC buộc phải sinh ra các lệnh hợp ngữ **`mov`** gán trực tiếp từng byte ký tự vào các ô nhớ thuộc Stack Frame của hàm `main` tại thời điểm runtime. Khi tệp tin PE nằm tĩnh trên ổ đĩa, chuỗi ký tự hoàn toàn biến mất, chỉ còn lại các lệnh mã máy nạp RAM rời rạc.
