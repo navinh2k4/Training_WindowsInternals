@@ -30,6 +30,9 @@ Quy trình toán học giải phẫu và vá mìn điều hướng của Lab PE 
                            └──> [Vá Inline JMP Stub x64 -> ResumeThread kích nổ]
 
 ```
+<br>
+<img width="1479" height="2802" alt="image" src="https://github.com/user-attachments/assets/11b3d2f1-8e2e-4ef8-ba9f-7c419808c4c1" />
+
 
 1. **Trích xuất Base Address thông qua cấu trúc PEB**: Trên kiến trúc Windows x64, tại thời điểm một luồng thực thi bị đóng băng sơ khởi, thanh ghi **`Rdx`** của CPU sẽ chịu trách nhiệm lưu giữ địa chỉ trỏ đến bản ghi cấu trúc **PEB**. Bằng giải thuật đọc ô nhớ ảo từ xa tại tọa độ toán học `Rdx + 0x10`, Loader sẽ bốc tách chính xác địa chỉ gốc `ImageBaseAddress` thực tế của tiến trình vỏ bọc trên RAM mà không bị ảnh hưởng bởi cơ chế ngẫu nhiên hóa ASLR.
 2. **Giải phẫu PE Header định vị tọa độ khai hỏa**: Loader phát lệnh đọc $4\text{ KB}$ phân vùng Headers đầu tiên của `ImageBaseAddress` để phân tích cấu trúc cấu hình DOS và NT Headers từ xa. Tọa độ tuyệt đối của điểm EntryPoint hợp pháp được tính toán kịch khung bằng công thức:
