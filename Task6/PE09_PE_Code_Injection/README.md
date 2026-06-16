@@ -28,6 +28,9 @@ Khi một tệp tin PE được nạp lên bộ nhớ ảo thông qua các phân
                                      └──> [CreateRemoteThread: Khai hỏa luồng tại EntryPoint ký sinh]
 
 ```
+<br>
+<img width="1222" height="2558" alt="image" src="https://github.com/user-attachments/assets/0f5a81cf-0197-4c6b-ba09-394844d11ae0" />
+
 
 1. **Phân bổ không gian Image từ xa (`VirtualAllocEx`)**: Loader tiến hành giải phẫu cấu trúc NT Headers của file PE mục tiêu nhằm bóc tách thông số **`SizeOfImage`** (Tổng dung lượng không gian ảo mà file PE sẽ chiếm giữ khi nạp lên RAM). Kế tiếp, Loader phát lệnh `VirtualAllocEx` để cam kết (`MEM_COMMIT`) một vùng không gian ảo có kích thước vừa khít đến từng byte mang quyền hạn **`PAGE_EXECUTE_READWRITE` (RWX)** lọt lòng tiến trình đích.
 2. **Ánh xạ cấu trúc phân đoạn (Manual Section Mapping)**:
