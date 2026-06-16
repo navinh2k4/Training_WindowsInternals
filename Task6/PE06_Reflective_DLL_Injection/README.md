@@ -30,6 +30,10 @@ Khi hệ điều hành Windows nạp một tệp tin PE thông thường, phân 
                                      └──> [Kích nổ DllMain (DLL_PROCESS_ATTACH)]
 
 ```
+<br>
+<img width="1855" height="2910" alt="image" src="https://github.com/user-attachments/assets/b38b3c78-8165-450e-823d-4b3435a90a81" />
+
+
 
 1. **Định vị điểm nạp tự thân**: Ngay khi luồng CPU từ xa được kích hoạt và nhảy vào hàm `ReflectiveLoader`, hàm này thực thi một giải thuật tịnh tiến ngược bộ nhớ (Caller-hydrated Loop) để tìm kiếm Signature **`MZ` (`0x5A4D`)** của chính nó, từ đó xác định chính xác tọa độ gốc của mảng byte thô đang ký sinh trên RAM.
 2. **Khởi tạo không gian Image đích**: Hàm thực hiện cuộc gọi `VirtualAlloc` nội tại ngay inside tiến trình mục tiêu để yêu cầu cấp phát một vùng không gian ảo hoàn toàn mới có kích thước vừa khít với thông số **`SizeOfImage`** được bóc tách từ cấu trúc `IMAGE_OPTIONAL_HEADER`.
