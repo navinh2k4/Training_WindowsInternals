@@ -29,6 +29,10 @@ Hệ điều hành Windows quản lý quyền hạn thực thi, đọc, ghi củ
                            └──> [CreateRemoteThread: Khai hỏa Thread Context]
 
 ```
+<br>
+<img width="633" height="779" alt="image" src="https://github.com/user-attachments/assets/37cdb72b-2518-4132-8676-aff0ca41da36" />
+<br>
+
 
 1. **Ngụy trang phân vùng dữ liệu ảo (`VirtualAllocEx`)**: Loader gửi yêu cầu xuống Kernel xin cấp phát một vùng nhớ chéo tiến trình mang cờ thuộc tính `PAGE_READWRITE`. Đối với hệ thống giám sát hành vi của EDR, đây là hành vi khởi tạo phân vùng chứa dữ liệu thông thường (như nạp bộ đệm văn bản, khởi tạo mảng) của các ứng dụng chuẩn chỉ, do đó cấu trúc này hoàn toàn vượt qua vòng thẩm duyệt hành vi sơ khởi.
 2. **Nạp dữ liệu cấu trúc tĩnh (`WriteProcessMemory`)**: Loader tiến hành sao chép mảng byte dữ liệu tuyệt đối toán học và khối mã máy phẳng vào phân vùng mang quyền `RW` vừa tạo. Tại thời điểm này, khối mã máy ký sinh hoàn toàn bất động và không có khả năng kích nổ luồng. Nếu con trỏ lệnh CPU vô tình nhảy vào tọa độ này, cơ chế bảo vệ phần cứng **Data Execution Prevention (DEP)** của bộ vi xử lý sẽ ngay lập tức chặn đứng và sụp đổ tiến trình (`Access Violation - 0xC0000005`).
