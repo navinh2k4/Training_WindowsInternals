@@ -30,7 +30,8 @@ Hệ điều hành Windows quản lý quyền hạn thực thi, đọc, ghi củ
 
 ```
 <br>
-<img width="633" height="779" alt="image" src="https://github.com/user-attachments/assets/37cdb72b-2518-4132-8676-aff0ca41da36" />
+<img width="1884" height="2366" alt="image" src="https://github.com/user-attachments/assets/b9a5fb68-3164-406d-9a84-faa1a76abcbe" />
+
 <br>
 
 
