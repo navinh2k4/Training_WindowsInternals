@@ -32,7 +32,8 @@ Quy trình toán học giải phẫu ngữ cảnh và chiếm quyền điều ph
 
 ```
 <br>
-<img width="526" height="772" alt="image" src="https://github.com/user-attachments/assets/10f4131e-a974-42c2-b5a0-713cd4a9ca6c" />
+<img width="1704" height="2622" alt="image" src="https://github.com/user-attachments/assets/38dac393-c3bc-4cb3-9ea8-6590796fcebd" />
+
 
 
 1. **Truy vết bản đồ địa chỉ nạp (`ImageBaseAddress`)**: Khi luồng chính (Main Thread) của tiến trình vỏ bọc bị hoãn lệnh sơ khởi (`CREATE_SUSPENDED`), hệ điều hành nạp địa chỉ trỏ đến cấu trúc quản lý **PEB** của nạn nhân vào thanh ghi phần cứng **`Rdx`** của CPU. Loader phát lệnh `ReadProcessMemory` bốc tách ô nhớ tại vị trí offset `0x10` của PEB để lấy chính xác tọa độ nạp thực tế ImageBaseAddress của Notepad trên RAM.
