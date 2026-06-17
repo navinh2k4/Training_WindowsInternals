@@ -28,9 +28,8 @@ Khi một tệp tin PE được nạp lên bộ nhớ ảo thông qua các phân
                                      └──> [CreateRemoteThread: Khai hỏa luồng tại EntryPoint ký sinh]
 
 ```
-<br>
-<img width="1222" height="2558" alt="image" src="https://github.com/user-attachments/assets/0f5a81cf-0197-4c6b-ba09-394844d11ae0" />
 
+![](_assets/Pasted%20image%2020260617084301.png)
 
 1. **Phân bổ không gian Image từ xa (`VirtualAllocEx`)**: Loader tiến hành giải phẫu cấu trúc NT Headers của file PE mục tiêu nhằm bóc tách thông số **`SizeOfImage`** (Tổng dung lượng không gian ảo mà file PE sẽ chiếm giữ khi nạp lên RAM). Kế tiếp, Loader phát lệnh `VirtualAllocEx` để cam kết (`MEM_COMMIT`) một vùng không gian ảo có kích thước vừa khít đến từng byte mang quyền hạn **`PAGE_EXECUTE_READWRITE` (RWX)** lọt lòng tiến trình đích.
 2. **Ánh xạ cấu trúc phân đoạn (Manual Section Mapping)**:
@@ -170,14 +169,17 @@ int main() {
         std::cerr << "[-] CreateRemoteThread failed! Error: " << GetLastError() << std::endl;
     }
 
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "\n[+] PE Code Injection Process Completed Successfully!" << std::endl;
+    std::cout << "[*] PAUSE: Check System Informer inside 'notepad.exe' Memory Map NOW for RWX!" << std::endl;
+    std::cout << "[*] Press Enter HERE to cleanup after verification..." << std::endl;
+    std::cin.get();
+
     // ─── BƯỚC 4: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
     VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
     CloseHandle(hProcess);
 
-    std::cout << "\n[+] PE Code Injection Process Completed Successfully!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de dong cua so..." << std::endl;
-    std::cin.get();
     return EXIT_SUCCESS;
 }
 
@@ -202,22 +204,66 @@ int main() {
 Khởi chạy ứng dụng vỏ bọc `Notepad.exe` trên môi trường máy Lab, sau đó thực thi tệp tin nhị phân Loader thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm kiểm chứng thuật toán Manual Mapping chéo RAM:
 
 ```powershell
-PS C:\Users\Admin\source\repos\Task6\PE09_PE_Code_Injection\x64\Release> C:\Users\Admin\source\repos\Task6\PE09_PE_Code_Injection\x64\Release\PE_Code_Injection.exe
 ====================================================
 [*] PE 09: PE CODE INJECTION REMOTE
 ====================================================
-[+] Da tim thay Notepad.exe voi PID: 12084
-[+] Vung nho Code RWX trong Notepad dat tai: 0x00000250E28A0000
+[+] Da tim thay Notepad.exe voi PID: 11700
+[+] Vung nho Code RWX trong Notepad dat tai: 0x0000024730F90000
 [+] Anh xa tung segment ma may va du lieu sang RAM doi phuong hoan tat.
 [*] Dang khoi tao luong CreateRemoteThread de kich no...
 [+] Luong Thread tu xa da hoan thanh nhiem vu kich no!
 
 [+] PE Code Injection Process Completed Successfully!
-[*] Nhan phim Enter de dong cua so...
+[*] PAUSE: Check System Informer inside 'notepad.exe' Memory Map NOW for RWX!
+[*] Press Enter HERE to cleanup after verification...
 
 ```
 
-### Demo: 
-<img width="1920" height="600" alt="devenv_MMWbT4YRCD" src="https://github.com/user-attachments/assets/958bfc4c-d309-46c0-bbeb-9bf17e3c4b8a" />
+
+### Kiểm chứng PE 09: PE Code Injection Remote
+
+**Bản chất kỹ thuật:** Thẩm định khả năng can thiệp bộ nhớ ảo xuyên biên giới tiến trình. Mã nguồn trích xuất mảng mã máy thô của hàm PIC `InjectedFunction` kết hợp bản ghi dữ liệu cấu trúc tuyệt đối `THREAD_DATA`, sau đó bơm trực tiếp vào không gian địa chỉ ảo của `notepad.exe` mà không cần phụ thuộc vào một file thực thi vật lý trên đĩa cứng. Tiến trình mục tiêu sau khi bị can thiệp sẽ chứa một trang nhớ `Private` mang đặc quyền `RWX` lạ nằm ngoài các phân vùng Image đã đăng ký hệ thống.
+
+**Quy trình kiểm tra bằng System Informer:**
+
+1. Mở sẵn một cửa sổ `notepad.exe` hợp pháp.
+
+2. Khởi chạy file thực thi `PE_Code_Injection.exe`. Cửa sổ `calc.exe` bật lên và màn hình dòng lệnh dừng lại ở thông báo `PAUSE`. Giữ nguyên màn hình này, tuyệt đối không nhấn Enter.**
+
+![](_assets/Pasted%20image%2020260617153228.png)
+
+3. Ghi lại tọa độ địa chỉ phân vùng Code được in lộ thiên trên màn hình Console 
+
+![](_assets/Pasted%20image%2020260617153240.png)
+
+[+] Da tim thay Notepad.exe voi PID: 12508
+[+] Vung nho Code RWX trong Notepad dat tai: 0x000002455EA80000
+
+4. Truy cập **System Informer** $\rightarrow$ Nhấn đúp vào tiến trình **`notepad.exe`** mang PID mà Injector vừa can thiệp $\rightarrow$ Chuyển sang tab **Memory**.
+
+![](_assets/Pasted%20image%2020260617153258.png)
+
+5. **Chỉ dấu đúng bản chất (Săn tìm Artifacts chéo tiến trình):**
+
+- Cuộn bảng danh sách tìm đúng dòng địa chỉ Base Address khớp khít 100% với mã Hex in trên màn hình Console (`0x000002455EA80000`).
+
+![](_assets/Pasted%20image%2020260617153339.png)
+
+- Dòng này bắt buộc phải hiển thị chính xác thuộc tính cấu hình là **`Type: Private`** và **`Protection: RWX`** (PAGE_EXECUTE_READWRITE).
+
+![](_assets/Pasted%20image%2020260617153611.png)
+
+- Nhấn đúp chuột vào dòng địa chỉ đó, chọn tab **Hex**: sẽ nhìn thấy toàn bộ các byte mã máy thô của hàm `InjectedFunction` đang nằm ký sinh lọt lòng bộ nhớ ảo của Notepad.
+
+![](_assets/Pasted%20image%2020260617153618.png)
+
+- Tìm phân vùng lân cận mang cờ **`Protection: RW`** (PAGE_READWRITE). Nhấn đúp chọn tab **Hex** sẽ thấy rõ chuỗi lệnh điều hướng phẳng của bạn: `cmd.exe /c start calc`.
+
+![](_assets/Pasted%20image%2020260617153632.png)
+
+![](_assets/Pasted%20image%2020260617153638.png)
+
+### Demo:
+![](_assets/devenv_m3pk0TNouo.gif)
 
 ---

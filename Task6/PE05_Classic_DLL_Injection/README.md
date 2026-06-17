@@ -29,9 +29,8 @@ Quy trình toán học giải phẫu và ép nạp Image mô-đun chéo tiến t
                            └──> [CreateRemoteThread: Khai hỏa PE Loader từ xa]
 
 ```
-<br>
-<img width="1855" height="2910" alt="image" src="https://github.com/user-attachments/assets/67d243c9-d3d8-4f7e-874a-c86b33b38997" />
 
+![](_assets/Pasted%20image%2020260617084129.png)
 
 1. **Khắc vạch ô chứa dữ liệu từ xa (`VirtualAllocEx`)**: Do hàm hệ thống `LoadLibraryW` yêu cầu tham số đầu vào là một con trỏ trỏ đến chuỗi ký tự Wide-character chứa đường dẫn của tệp DLL, Loader không thể truyền con trỏ cục bộ sang RAM đối phương do tính cô lập không gian địa chỉ ảo. Loader buộc phải sử dụng `VirtualAllocEx` để khởi tạo một trang nhớ mang cờ bảo vệ **`PAGE_READWRITE` (RW)** bên lòng tiến trình đích với kích thước vừa khít độ dài chuỗi ký tự.
 2. **Ánh xạ chuỗi đường dẫn (`WriteProcessMemory`)**: Ghi dữ liệu chuỗi đường dẫn tệp DLL vật lý 
@@ -214,8 +213,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved) {
 
 ```
 
-<img width="1301" height="650" alt="image" src="https://github.com/user-attachments/assets/72a94efa-45ff-4b73-831f-2004f946fb6c" />
-
+![](_assets/Pasted%20image%2020260617094542.png)
 
 ---
 
@@ -252,8 +250,41 @@ PS C:\Users\Admin\source\repos\Task6\PE05_Classic_DLL_Injection\x64\Release> C:\
 
 ```
 
+
+### **Quy trình kiểm tra bằng System Informer:**
+
+1. Mở sẵn một cửa sổ `notepad.exe` sạch.
+
+2. Khởi chạy file thực thi `Classic_DLL_Injection.exe`.
+
+3. Hộp thoại thông báo `"DLL Injected successfully via LoadLibraryA!"` 
+
+![](_assets/Pasted%20image%2020260617095251.png)
+
+4. Mở **System Informer** $\rightarrow$ Nhấn đúp vào đúng tiến trình **`notepad.exe`** mang PID mà Injector vừa báo.
+
+5. **Chỉ dấu đúng bản chất:**
+
+- Chuyển sang tab **Modules**: Sắp xếp danh sách theo bảng chữ cái và tìm tên tệp tin DLL.
+
+![](_assets/Pasted%20image%2020260617095324.png)
+
+- Sẽ thấy `PandaDLL.dll` hiện diện hiên ngang trong không gian ảo của Notepad. Nhấn đúp vào module này để xem dòng **Base address** $\rightarrow$ Tọa độ hex của nó sẽ khớp khít với mã Base Address được trả về tại cửa sổ dòng lệnh Console.
+
+![](_assets/Pasted%20image%2020260617095346.png)
+
+![](_assets/Pasted%20image%2020260617095407.png)
+
+- Chuyển sang tab **Memory**: Tìm kiếm dòng địa chỉ chứa chuỗi đường dẫn từ xa mà Injector in ra (`0x0000024375E30000`). Dòng này sẽ mang cờ **`Type: Private`** và **`Protection: RW`**. Nhấn đúp vào xem tab **Hex** sẽ thấy lộ thiên chuỗi đường dẫn tuyệt đối dẫn tới file `PandaDLL.dll` trên ổ đĩa.
+
+![](_assets/Pasted%20image%2020260617095702.png)
+
+![](_assets/Pasted%20image%2020260617095644.png)
+
+![](_assets/Pasted%20image%2020260617095720.png)
+
 ### Demo
-<img width="1920" height="600" alt="devenv_P3jw9hdaUH" src="https://github.com/user-attachments/assets/bf583db5-4602-41ad-befd-ff79ab6f6f7c" />
+![](_assets/devenv_0Ey7YK87eO.gif)
 
 
 ---

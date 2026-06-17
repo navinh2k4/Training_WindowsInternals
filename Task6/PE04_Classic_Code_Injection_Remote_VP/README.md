@@ -29,11 +29,8 @@ Hệ điều hành Windows quản lý quyền hạn thực thi, đọc, ghi củ
                            └──> [CreateRemoteThread: Khai hỏa Thread Context]
 
 ```
-<br>
-<img width="1884" height="2366" alt="image" src="https://github.com/user-attachments/assets/b9a5fb68-3164-406d-9a84-faa1a76abcbe" />
 
-<br>
-
+![](_assets/Pasted%20image%2020260617084005.png)
 
 1. **Ngụy trang phân vùng dữ liệu ảo (`VirtualAllocEx`)**: Loader gửi yêu cầu xuống Kernel xin cấp phát một vùng nhớ chéo tiến trình mang cờ thuộc tính `PAGE_READWRITE`. Đối với hệ thống giám sát hành vi của EDR, đây là hành vi khởi tạo phân vùng chứa dữ liệu thông thường (như nạp bộ đệm văn bản, khởi tạo mảng) của các ứng dụng chuẩn chỉ, do đó cấu trúc này hoàn toàn vượt qua vòng thẩm duyệt hành vi sơ khởi.
 2. **Nạp dữ liệu cấu trúc tĩnh (`WriteProcessMemory`)**: Loader tiến hành sao chép mảng byte dữ liệu tuyệt đối toán học và khối mã máy phẳng vào phân vùng mang quyền `RW` vừa tạo. Tại thời điểm này, khối mã máy ký sinh hoàn toàn bất động và không có khả năng kích nổ luồng. Nếu con trỏ lệnh CPU vô tình nhảy vào tọa độ này, cơ chế bảo vệ phần cứng **Data Execution Prevention (DEP)** của bộ vi xử lý sẽ ngay lập tức chặn đứng và sụp đổ tiến trình (`Access Violation - 0xC0000005`).
@@ -155,7 +152,6 @@ int main() {
         HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, pRemoteData, 0, NULL);
 
         if (hThread) {
-            // Đợi luồng hoàn thành chu kỳ xử lý mở Máy tính, phá băng nghẽn luồng Windows 11
             WaitForSingleObject(hThread, INFINITE);
             std::cout << "[+] Luong Thread tu xa da hoan thanh nhiem vu." << std::endl;
             CloseHandle(hThread);
@@ -167,6 +163,10 @@ int main() {
     else {
         std::cerr << "[-] VirtualProtectEx that bai! Ma loi: " << std::dec << GetLastError() << std::endl;
     }
+
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "\n[*] PAUSE: Checking memory layout inside Notepad now... Press Enter after verification." << std::endl;
+    std::cin.get();
 
     // ─── BƯỚC 5: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
@@ -198,23 +198,48 @@ int main() {
 Khởi chạy ứng dụng vỏ bọc `Notepad.exe` trên môi trường máy Lab, sau đó kích hỏa tệp tin `.exe` thông qua cửa sổ dòng lệnh PowerShell ngoài đĩa thô nhằm theo dõi ma trận lật cờ bảo vệ trang nhớ:
 
 ```powershell
-PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Release> C:\Users\Admin\source\repos\Task6\PE04_Classic_Code_Injection_Remote_VP\x64\Release\Classic_Code_Injection_Remote_VP.exe
 ====================================================
 [*] PE 04: CLASSIC CODE INJECTION REMOTE WITH VP
 ====================================================
-[+] Da tim thay Notepad.exe voi PID: 4556
-[+] Phan vung Code khoi tao voi quyen RW tai: 0x0000028628300000
+[+] Da tim thay Notepad.exe voi PID: 20260
+[+] Phan vung Code khoi tao voi quyen RW tai: 0x00000232831F0000
 [+] Day logic ham va cau truc tham so sang RAM Notepad hoan tat.
 [*] Dang dung VirtualProtectEx de lat quyen trang nho Code sang RX...
 [+] Lat quyen trang nho thanh cong! Quyen cu: 0x4
 [*] Dang khoi tao luong CreateRemoteThread de khai hoa...
 [+] Luong Thread tu xa da hoan thanh nhiem vu.
-[+] Quy trinh giai phong RAM tu xa hoan tat.
+
+[*] PAUSE: Checking memory layout inside Notepad now... Press Enter after verification.
 
 ```
 
+### Kiểm chứng PE 04: Classic Code Injection Remote VP (PIC - RW -> RX)
+
+- **Bản chất kỹ thuật:** Kiểm chứng sự chuyển dịch trạng thái an toàn bảo mật. Phân vùng chứa mã máy PIC của hàm `LaunchCalculator` bên trong lòng Notepad **chỉ được phép mang đặc quyền `RX` (PAGE_EXECUTE_READ)**, xóa sạch dấu vết đặc quyền ghi (`W`).
+
+- **Quy trình kiểm tra bằng System Informer:**
+
+1. Mở sẵn `notepad.exe` $\rightarrow$ Chạy Malware PE 04.
+
+![](_assets/Pasted%20image%2020260617093750.png)
+
+2. Vào System Informer $\rightarrow$ Nhấn đúp vào **`notepad.exe`** $\rightarrow$ Chọn tab **Memory**.
+
+![](_assets/Pasted%20image%2020260617093805.png)
+
+3. **Chỉ dấu đúng bản chất:** 
+* Quét toàn bộ danh sách bộ nhớ: sẽ **không tìm thấy bất kỳ dòng `Private` nào mang cờ `RWX`**.
+
+![](_assets/Pasted%20image%2020260617093834.png)
+
+- Thay vào đó, tại tọa độ địa chỉ Hex mà Malware in ra màn hình cho phân vùng chứa code, sẽ thấy cột Protection hiển thị chính xác chữ **`RX`**. Nhấn đúp xem tab **Hex** vẫn thấy thân hàm PIC hoạt động bình thường. Điều này chứng minh hàm `VirtualProtectEx` đã lật mìn thành công để qua mặt các bộ quét heuristic dò cờ ghi-thực-thi đồng thời!
+
+![](_assets/Pasted%20image%2020260617093953.png)
+
+![](_assets/Pasted%20image%2020260617094008.png)
+
 # Demo
-<img width="1920" height="600" alt="devenv_8pZPtZUiqZ" src="https://github.com/user-attachments/assets/ce4f533d-a5fd-4a05-a11f-0764234734d6" />
+![](_assets/devenv_zscOtq8S0h.gif)
 
 
 ---

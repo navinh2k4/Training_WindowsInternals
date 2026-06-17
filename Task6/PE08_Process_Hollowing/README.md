@@ -30,9 +30,8 @@ Quy trình toán học giải phẫu và vá mìn điều hướng của Lab PE 
                            └──> [Vá Inline JMP Stub x64 -> ResumeThread kích nổ]
 
 ```
-<br>
-<img width="1479" height="2802" alt="image" src="https://github.com/user-attachments/assets/11b3d2f1-8e2e-4ef8-ba9f-7c419808c4c1" />
 
+![](_assets/Pasted%20image%2020260617084240.png)
 
 1. **Trích xuất Base Address thông qua cấu trúc PEB**: Trên kiến trúc Windows x64, tại thời điểm một luồng thực thi bị đóng băng sơ khởi, thanh ghi **`Rdx`** của CPU sẽ chịu trách nhiệm lưu giữ địa chỉ trỏ đến bản ghi cấu trúc **PEB**. Bằng giải thuật đọc ô nhớ ảo từ xa tại tọa độ toán học `Rdx + 0x10`, Loader sẽ bốc tách chính xác địa chỉ gốc `ImageBaseAddress` thực tế của tiến trình vỏ bọc trên RAM mà không bị ảnh hưởng bởi cơ chế ngẫu nhiên hóa ASLR.
 2. **Giải phẫu PE Header định vị tọa độ khai hỏa**: Loader phát lệnh đọc $4\text{ KB}$ phân vùng Headers đầu tiên của `ImageBaseAddress` để phân tích cấu trúc cấu hình DOS và NT Headers từ xa. Tọa độ tuyệt đối của điểm EntryPoint hợp pháp được tính toán kịch khung bằng công thức:
@@ -209,20 +208,16 @@ int main() {
         std::cerr << "[-] Lat quyen EntryPoint de ghi de that bai! Error: " << GetLastError() << std::endl;
     }
 
+    // ── GÀI ĐIỂM DỪNG CHIẾN LƯỢC TẠI ĐÂY ĐỂ ĐÍNH KÈM DEBUGGER ──
+    std::cout << "\n[*] PAUSE: Notepad is currently FROZEN in memory." << std::endl;
+    std::cout << "[*] Open x64dbg NOW, attach to PID: " << std::dec << pi.dwProcessId << std::endl;
+    std::cout << "[*] Press Enter HERE only AFTER you have followed EntryPoint in x64dbg..." << std::endl;
+    std::cin.get();
+
     // ─── BƯỚC 7: KÍCH HOẠT RÃ ĐÔNG ĐỂ LUỒNG TỰ ĐỘNG KHAI HỎA CHIẾN DỊCH ───
     std::cout << "[*] Kich hoat ra dong (ResumeThread) de luong tu dong kich no APC..." << std::endl;
     ResumeThread(pi.hThread);
-
-    std::cout << "\n[+] Process Hollowing (Active Path Custom) Successful!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de don dep va dong cua so..." << std::endl;
-    std::cin.get();
-
-    // Thu hồi triệt để tài nguyên chống rò rỉ bộ nhớ (Memory Leak)
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return EXIT_SUCCESS;
 }
-
 ```
 
 ---
@@ -244,26 +239,79 @@ int main() {
 Khai hỏa file thực thi thông qua cửa sổ dòng lệnh PowerShell ngoài ổ đĩa thực tế để theo dõi ma trận can thiệp ngữ cảnh:
 
 ```powershell
-PS C:\Users\Admin\source\repos\Task6\PE07_Reflective_DLL_Loading_Lagos_Island\x64\Release> C:\Users\Admin\source\repos\Task6\PE08_Process_Hollowing\x64\Release\Process_Hollowing.exe
 ====================================================
 [*] PE 08: PROCESS HOLLOWING ACTIVE PATH (CALC.EXE)
 ====================================================
 [+] Da chu dong xac dinh duong dan vo boc: C:\WINDOWS\system32\notepad.exe
 [*] Dang khoi tao tien trinh vo boc o trang thai dong bang...
-[+] Tien trinh vo boc duoc tao voi PID: 13288
-[+] Toa do Base Address goc cua vo boc: 0x00007FF7AFEA0000
-[+] Toa do EntryPoint hop phap san co cua Notepad: 0x00007FF7B0002230
-[+] Vung nho Code RWX cua payload dat tai: 0x0000025C130D0000
+[+] Tien trinh vo boc duoc tao voi PID: 6140
+[+] Toa do Base Address goc cua vo boc: 0x00007FF77EA70000
+[+] Toa do EntryPoint hop phap san co cua Notepad: 0x00007FF77EBD2230
+[+] Vung nho Code RWX cua payload dat tai: 0x000001B2B14A0000
 [+] Nap va thiet lap JMP Stub be huong tai EntryPoint hop phap hoan tat!
-[*] Kich hoat ra dong (ResumeThread) de luong tu dong kich no APC...
 
-[+] Process Hollowing (Active Path Custom) Successful!
-[*] Nhan phim Enter de don dep va dong cua so...
+[*] PAUSE: Notepad is currently FROZEN in memory.
+[*] Open x64dbg NOW, attach to PID: 6140
+[*] Press Enter HERE only AFTER you have followed EntryPoint in x64dbg...
 
 ```
 
-### Demo:
-<img width="1920" height="600" alt="devenv_cAeNqlDm1h" src="https://github.com/user-attachments/assets/055f6b42-b507-4a35-85f4-749742da92b0" />
 
+### Kiểm chứng PE 08: Process Hollowing 
+
+**Bản chất kỹ thuật:** Thẩm định khả năng tự sinh tiến trình `notepad.exe` hoàn toàn mới ở trạng thái đóng băng (`CREATE_SUSPENDED`), can thiệp thanh ghi cấu trúc để tính toán tọa độ vạch xuất phát, và vá đè mã máy **`JMP Stub`** (22-byte) trực tiếp lên `EntryPoint` hợp pháp gốc. Khi gọi `ResumeThread`, tiến trình vỏ bọc thức dậy và bị ép buộc nhảy thẳng vào phân vùng mã máy PIC phụ (`remoteCodeBuffer`) để mở máy tính.
+
+**Quy trình kiểm tra bằng x64dbg:**
+
+1. Khởi chạy file thực thi `Process_Hollowing.exe`. Cửa sổ `calc.exe` bật lên, đồng thời màn hình Console dừng lại ở thông báo: `[*] Nhan phim Enter de don dep va dong cua so...`. giữ nguyên không nhấn Enter.**
+
+![](_assets/Pasted%20image%2020260617145746.png)
+
+2. Ghi lại các thông số toán học in trên màn hình Console:
+
+- Tiến trình vỏ bọc PID: 5408
+C:\WINDOWS\system32\notepad.exe
+
+![](_assets/Pasted%20image%2020260617145829.png)
+
+- Tọa độ `EntryPoint` hợp pháp của Notepad
+[+] Toa do EntryPoint hop phap san co cua Notepad: 0x00007FF7EB2D2230
+
+3. Mở **x64dbg** (bản x64) $\rightarrow$ Nhấn **File** $\rightarrow$ **Attach** (hoặc nhấn `Alt + A`).
+
+![](_assets/Pasted%20image%2020260617145922.png)
+
+![](_assets/Pasted%20image%2020260617145934.png)
+
+3. Tìm kiếm và đính kèm luồng vào tiến trình vỏ bọc **`notepad.exe`** mang đúng số PID vừa ghi nhận.
+
+![](_assets/Pasted%20image%2020260617151210.png)
+
+![](_assets/Pasted%20image%2020260617151221.png)
+
+4. Tại màn hình giao diện tab CPU của x64dbg, nhấn tổ hợp phím tắt **`Ctrl + G`** (Go to expression).
+
+5. Nhập chính xác tọa độ địa chỉ `EntryPoint` mà Console đã in ra (Ví dụ: `0x00007FF7B0002230`) $\rightarrow$ Nhấn **Enter**.
+
+![](_assets/Pasted%20image%2020260617151249.png)
+
+![](_assets/Pasted%20image%2020260617151258.png)
+
+**Chỉ dấu đúng bản chất:**
+
+![](_assets/Pasted%20image%2020260617151337.png)
+
+![](_assets/Pasted%20image%2020260617151354.png)
+
+Tại vị trí con trỏ x64dbg vừa nhảy đến, sẽ thấy các lệnh gốc vẽ cửa sổ của Notepad đã bị đè nát. Thay vào đó, nó hiển thị chính xác cấu trúc mìn điều hướng `jmpStub` dài 22-byte mà đã lập trình:
+
+```assembly
+mov rcx, <Địa_chỉ_vùng_nhớ_pRemoteData>
+mov rax, <Địa_chỉ_vùng_nhớ_remoteCodeBuffer>
+jmp rax
+```
+
+### Demo:
+![](_assets/devenv_Ac6Gkphvc5.gif)
 
 ---

@@ -1,0 +1,214 @@
+{
+  "main": {
+    "id": "40380988d02a3542",
+    "type": "split",
+    "children": [
+      {
+        "id": "e653c5049fcfa83b",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "ed0351f036bb5fce",
+            "type": "leaf",
+            "state": {
+              "type": "empty",
+              "state": {},
+              "icon": "lucide-file",
+              "title": "New tab"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "cd4bff7153730694",
+    "type": "split",
+    "children": [
+      {
+        "id": "61afb7d190da71d3",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "c23716aa4364495e",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "0a8d7708e5759f5a",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "965755682a612b97",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "right": {
+    "id": "9411c9e897d44b77",
+    "type": "split",
+    "children": [
+      {
+        "id": "0eb6af14dfcdf2e1",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "c669e34a5e48817a",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "6589d6098390dbf7",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "0d3bf048ddb83b54",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "2eb373df48382e5b",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "24f1bf470faf24e8",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "ed0351f036bb5fce",
+  "lastOpenFiles": [
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/README.md",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/devenv_yFC48q7NTC.gif",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161424.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161238.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161222.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161202.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161139.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161122.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161102.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161046.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/_assets/Pasted image 20260617161019.png",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressO.6031fea6.tlog/Cl.items.tlog",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressO.6031fea6.tlog/link.command.1.tlog",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressO.6031fea6.tlog/link.secondary.1.tlog",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressO.6031fea6.tlog/link.write.1.tlog",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressO.6031fea6.tlog/link.read.1.tlog",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressO.6031fea6.tlog/link-cvtres.write.1.tlog",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressO.6031fea6.tlog/link-mt.write.1.tlog",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressOfEntryPoint_Code_Injection.iobj",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressOfEntryPoint_Code_Injection.pdb",
+    "Task6/PE10_AddressOfEntryPoint_Code_Injection/PE10_AddressOfEntryPoint_Code_Injection/x64/Release/AddressOfEntryPoint_Code_Injection.ipdb",
+    "Task6/PE09_PE_Code_Injection/README.md",
+    "Task6/PE08_Process_Hollowing/README.md",
+    "Task6/PE07_Reflective_DLL_Loading_Lagos_Island/README.md",
+    "Task6/PE06_Reflective_DLL_Injection/README.md",
+    "Task6/PE05_Classic_DLL_Injection/README.md",
+    "Task6/PE04_Classic_Code_Injection_Remote_VP/README.md",
+    "Task6/PE03_Classic_Code_Injection_API_Obfuscate/README.md",
+    "Task6/PE02_Classic_Code_Injection_Remote/README.md",
+    "Task6/PE01_Classic_Code_Injection_Local/README.md",
+    "Task6/PE18_PEB_Walk_&_APIs_Obfuscation/README.md"
+  ]
+}

@@ -116,6 +116,12 @@ int main() {
     WaitForSingleObject(hThread, INFINITE);
     std::cout << "[+] Luong Thread tu xa da hoan thanh nhiem vu." << std::endl;
 
+    // ── GÀI HỘP THOẠI ĐỂ ĐÓNG BĂNG MÃ ĐỘC, GIỮ LẠI VÙNG NHỚ TRÊN RAM NOTEPAD ──
+    MessageBoxA(NULL,
+        "[+] PAUSE: Check System Informer inside 'notepad.exe' Memory Map NOW for RWX!",
+        "PE 02 Remote Verification",
+        MB_OK | MB_ICONINFORMATION);
+
     // 7. Giải phóng tài nguyên triệt để chống rò rỉ bộ nhớ (Memory Leak)
     CloseHandle(hThread);
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);

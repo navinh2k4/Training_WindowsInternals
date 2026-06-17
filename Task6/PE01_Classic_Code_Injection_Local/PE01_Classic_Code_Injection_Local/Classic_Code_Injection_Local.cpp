@@ -75,13 +75,17 @@ int main() {
     WaitForSingleObject(hThread, INFINITE);
     std::cout << "[+] Luong Thread cuc bo da hoan thanh chu ky song." << std::endl;
 
-    // 6. Thu hồi tài nguyên và giải phóng triệt để vùng nhớ ảo
+    // ── ĐƯA HỘP THOẠI LÊN ĐÂY ĐỂ ĐÓNG BĂNG TIẾN TRÌNH TRƯỚC KHI GIẢI PHÓNG ──
+    MessageBoxA(NULL,
+        "[+] PAUSE: Check System Informer Memory Map NOW for RWX region!",
+        "Research Phase",
+        MB_OK | MB_ICONINFORMATION);
+
+    // 6. Thu hồi tài nguyên và giải phóng triệt để vùng nhớ ảo (Sẽ chạy sau khi bấm OK)
     CloseHandle(hThread);
     VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
     VirtualFree(pLocalData, 0, MEM_RELEASE);
     std::cout << "[+] Quy trinh giai phong RAM hoan tat." << std::endl;
-
-    MessageBoxA(NULL, "[+] PE 01: Local Injection with Absolute Pointers Successful!", "Success Status", MB_OK | MB_ICONINFORMATION);
 
     return EXIT_SUCCESS;
 }

@@ -26,6 +26,8 @@ Trong điều kiện vận hành thông thường của một tiến trình Wind
 
 ```
 
+![](_assets/Pasted%20image%2020260617080438.png)
+
 1. **Phân bổ không gian địa chỉ ảo (`VirtualAlloc`)**: Hệ điều hành Windows quản lý bộ nhớ thông qua các đơn vị trang (Virtual Pages) với kích thước mặc định là $4\text{ KB}$ (được quy định bởi cấu trúc phần cứng MMU). Hàm API này gửi yêu cầu xuống hệ thống quản lý bộ nhớ của Kernel nhằm đặt bảo lưu (`MEM_RESERVE`) và cam kết (`MEM_COMMIT`) một vùng không gian ảo riêng biệt, đồng thời gán hằng số bảo vệ **`PAGE_EXECUTE_READWRITE` (RWX)** để chuẩn bị bệ phóng cho luồng CPU.
 2. **Ánh xạ logic phẳng (`RtlCopyMemory`)**: Loader tiến hành sao chép tuyến tính toàn bộ khối mã máy thô của hàm Payload cùng thực thể chứa bảng tham số dữ liệu tuyệt đối sang phân vùng ảo vừa được mở khóa thuộc tính Ghi (`W`).
 3. **Thiết lập và khởi tạo ngữ cảnh luồng (`CreateThread`)**: Trình triệu hồi luồng của Windows khởi tạo một cấu trúc Thread Object hoàn toàn mới trong nhân Kernel. Trình quản lý luồng sẽ nạp tọa độ của trang bộ nhớ ảo vào thanh ghi chỉ mục lệnh **`Rip`** của CPU, đưa luồng vào trạng thái chờ (Ready State) trong hàng đợi lập lịch trước khi CPU chính thức rút lệnh xử lý.
@@ -113,17 +115,20 @@ int main() {
     WaitForSingleObject(hThread, INFINITE);
     std::cout << "[+] Luong Thread cuc bo da hoan thanh chu ky song." << std::endl;
 
-    // 6. Thu hồi tài nguyên và giải phóng triệt để vùng nhớ ảo
+    // ── ĐƯA HỘP THOẠI LÊN ĐÂY ĐỂ ĐÓNG BĂNG TIẾN TRÌNH TRƯỚC KHI GIẢI PHÓNG ──
+    MessageBoxA(NULL,
+        "[+] PAUSE: Check System Informer Memory Map NOW for RWX region!",
+        "Research Phase",
+        MB_OK | MB_ICONINFORMATION);
+
+    // 6. Thu hồi tài nguyên và giải phóng triệt để vùng nhớ ảo (Sẽ chạy sau khi bấm OK)
     CloseHandle(hThread);
     VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
     VirtualFree(pLocalData, 0, MEM_RELEASE);
     std::cout << "[+] Quy trinh giai phong RAM hoan tat." << std::endl;
 
-    MessageBoxA(NULL, "[+] PE 01: Local Injection with Absolute Pointers Successful!", "Success Status", MB_OK | MB_ICONINFORMATION);
-
     return EXIT_SUCCESS;
 }
-
 ```
 
 ---
@@ -158,7 +163,37 @@ PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Relea
 
 ```
 
+### 🛸 Kiểm chứng PE 01: Classic Code Injection Local
+
+- **Mục tiêu kiểm chứng:** Xác nhận tiến trình tự cấp phát một vùng nhớ mang đặc quyền `RWX` nội tại và tự sinh luồng phụ chạy tại chỗ.
+
+- **Các bước kiểm tra bằng Process Hacker / Systeminfomer:**
+
+1. Bật file `PE01.exe` lên và chạy nó với cmd để giữ tiến trình không bị tắt.
+
+![](_assets/Pasted%20image%2020260617081756.png)
+
+2. Mở Process Hacker $\rightarrow$ Tìm và nhấn đúp vào tiến trình `Classic_Code_Injection_Local.exe`.
+
+![](_assets/Pasted%20image%2020260617081840.png)
+
+![](_assets/Pasted%20image%2020260617081850.png)
+
+3. Chuyển sang tab **Memory**. Sắp xếp cột **Use** hoặc **Protection**.
+
+![](_assets/Pasted%20image%2020260617082827.png)
+
+4. **Chỉ dấu đúng bản chất (IoC):** tiến hành tìm một dòng có thuộc tính `PAGE_EXECUTE_READWRITE` (RWX) với kiểu là `Private`. Và Base address sẽ chính xác khớp với địa chỉ hiển thị được trên cmd khi chạy.
+
+![](_assets/Pasted%20image%2020260617082803.png)
+
+![](_assets/Pasted%20image%2020260617082938.png)
+
+5. Chuyển sang tab **Threads**: Sẽ thấy có ít nhất 2 luồng đang chạy cùng lúc.
+
+![](_assets/Pasted%20image%2020260617083041.png)
+
 ### Demo
-<img width="1920" height="600" alt="devenv_kUlV9XS9yK" src="https://github.com/user-attachments/assets/2dbd0b4c-d764-42ef-b5f6-52a64b8ca1c1" />
+![](_assets/devenv_KdHeUAOFJy.gif)
 
 ---

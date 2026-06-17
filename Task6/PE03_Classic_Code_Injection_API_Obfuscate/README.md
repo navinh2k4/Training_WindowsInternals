@@ -29,10 +29,7 @@ Giải thuật của Lab PE 03 bẻ gãy hoàn toàn cấu trúc IAT truyền th
 
 ```
 
-<br>
-<img width="1331" height="2974" alt="image" src="https://github.com/user-attachments/assets/34bfae9a-d2ba-410f-bffc-961790bbd4ff" />
-
-
+![](_assets/Pasted%20image%2020260617084105.png)
 
 1. **Khởi tạo chuỗi ẩn danh trên ngăn xếp (Stack-strings)**: Khai báo mảng ký tự rời rạc dưới dạng cấu trúc hốc mảng: `char vAllocName[] = { 'V','i','r','t','u','a','l','A','l','l','o','c','E','x',0 };`. Lúc này, trình biên dịch MSVC buộc phải sinh ra các lệnh hợp ngữ **`mov`** gán trực tiếp từng byte ký tự vào các ô nhớ thuộc Stack Frame của hàm `main` tại thời điểm runtime. Khi tệp tin PE nằm tĩnh trên ổ đĩa, chuỗi ký tự hoàn toàn biến mất, chỉ còn lại các lệnh mã máy nạp RAM rời rạc.
 2. **Xác định tọa độ Module gốc (`GetModuleHandleA`)**: Loader truyền mảng ký tự Stack-string đại diện cho `"kernel32.dll"` vào hàm tra cứu nhằm trích xuất địa chỉ Base Address sống của thư viện này trong không gian ảo cục bộ.
@@ -157,7 +154,7 @@ int main() {
     HANDLE hThread = DynamicCreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
 
     if (hThread) {
-        WaitForSingleObject(hThread, INFINITE); // Gánh luồng xử lý dứt điểm phẳng sạch
+        WaitForSingleObject(hThread, INFINITE);
         std::cout << "[+] Classic Code Injection with API Obfuscation Successful!" << std::endl;
         CloseHandle(hThread);
     }
@@ -165,16 +162,17 @@ int main() {
         std::cerr << "[-] CreateRemoteThread failed! Error code: " << GetLastError() << std::endl;
     }
 
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "\n[*] PAUSE: Checking memory layout inside Notepad now... Press Enter after verification." << std::endl;
+    std::cin.get();
+
     // Thu hồi vùng nhớ và đóng Handle hệ thống triệt để chống Memory Leak
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
     VirtualFreeEx(hProcess, remoteDataBuffer, 0, MEM_RELEASE);
     CloseHandle(hProcess);
 
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
     return EXIT_SUCCESS;
 }
-
 ```
 
 ---
@@ -187,10 +185,6 @@ int main() {
 
 1. Đặt thanh công cụ quản lý cấu hình dự án ở chế độ **`Release`** và nền tảng kiến trúc phần cứng chuyên dụng **`x64`**.
 2. Đi tới cấu hình dự án: `Project Properties` $\rightarrow$ `C/C++` $\rightarrow$ `Code Generation` $\rightarrow$ Tại mục `Runtime Library`, chuyển đổi cấu hình sang cờ tiêu chuẩn **`Multi-threaded (/MT)`** nhằm nhúng tĩnh (Static Linkage) toàn bộ thư viện liên kết động của CRT vào trong cấu trúc file `.exe`.
-
-<img width="1001" height="684" alt="image" src="https://github.com/user-attachments/assets/8f5105bb-5a32-4db8-a0be-f875e6a972e4" />
-
-
 3. Click chuột phải vào tên dự án $\rightarrow$ Chọn **`Rebuild`** để kết xuất tệp tin nhị phân phẳng sạch kịch trần.
 
 ---
@@ -215,9 +209,37 @@ PS C:\Users\Admin\source\repos\Task6\PE01_Classic_Code_Injection_Local\x64\Relea
 
 ```
 
-### Demo
-<img width="1920" height="600" alt="devenv_jaQDjbU0dJ" src="https://github.com/user-attachments/assets/407a68dc-b2d5-4054-a40f-4512ad7ec70b" />
 
+### **Quy trình kiểm tra bằng System Informer:**
+
+1. Mở sẵn một cửa sổ `notepad.exe` sạch.
+
+2. Khởi chạy file thực thi `Classic_Code_Injection_API_Obfuscate.exe`. Cửa sổ `calc.exe` bật lên và màn hình Console dừng lại ở thông báo PAUSE. **Vinh giữ nguyên không nhấn Enter.**
+
+![](_assets/Pasted%20image%2020260617092102.png)
+
+2. Xem địa chỉ in trên màn hình Console (Ví dụ: `[+] Vung nho Code RWX cua payload dat tai: 0x00000286...`).
+
+3. Vào System Informer $\rightarrow$ Nhấn đúp vào tiến trình **`notepad.exe`** $\rightarrow$ Chuyển sang tab **Memory**.
+
+![](_assets/Pasted%20image%2020260617092607.png)
+
+4. **Chỉ dấu đúng bản chất:**
+
+- Tìm đúng dòng Base Address trùng khớp với mã Hex được in ra. Dòng này phải hiển thị chính xác thuộc tính **`Type: Private`** và **`Protection: RWX`** (PAGE_EXECUTE_READWRITE). Nhấn đúp vào chọn tab **Hex** sẽ thấy mã máy thô của hàm PIC.
+
+![](_assets/Pasted%20image%2020260617092644.png)
+
+![](_assets/Pasted%20image%2020260617092659.png)
+
+- Tìm phân vùng lân cận mang cờ **`Protection: RW`** (PAGE_READWRITE). Nhấn đúp chọn tab **Hex** sẽ thấy chuỗi tham số mở máy tính dạng text phẳng lộ thiên: `cmd.exe /c start calc`.
+
+![](_assets/Pasted%20image%2020260617092722.png)
+
+![](_assets/Pasted%20image%2020260617092729.png)
+
+### Demo
+![](_assets/devenv_csPONgbJHj.gif)
 
 
 ---

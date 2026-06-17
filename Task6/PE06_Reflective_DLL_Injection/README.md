@@ -30,10 +30,8 @@ Khi hệ điều hành Windows nạp một tệp tin PE thông thường, phân 
                                      └──> [Kích nổ DllMain (DLL_PROCESS_ATTACH)]
 
 ```
-<br>
-<img width="1855" height="2910" alt="image" src="https://github.com/user-attachments/assets/b38b3c78-8165-450e-823d-4b3435a90a81" />
 
-
+![](_assets/Pasted%20image%2020260617084153.png)
 
 1. **Định vị điểm nạp tự thân**: Ngay khi luồng CPU từ xa được kích hoạt và nhảy vào hàm `ReflectiveLoader`, hàm này thực thi một giải thuật tịnh tiến ngược bộ nhớ (Caller-hydrated Loop) để tìm kiếm Signature **`MZ` (`0x5A4D`)** của chính nó, từ đó xác định chính xác tọa độ gốc của mảng byte thô đang ký sinh trên RAM.
 2. **Khởi tạo không gian Image đích**: Hàm thực hiện cuộc gọi `VirtualAlloc` nội tại ngay inside tiến trình mục tiêu để yêu cầu cấp phát một vùng không gian ảo hoàn toàn mới có kích thước vừa khít với thông số **`SizeOfImage`** được bóc tách từ cấu trúc `IMAGE_OPTIONAL_HEADER`.
@@ -363,7 +361,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved) {
 
 ```
 
-<img width="1326" height="702" alt="image" src="https://github.com/user-attachments/assets/81bfa045-1881-4a68-9cd9-1e818a52f239" />
+![](_assets/Pasted%20image%2020260617131325.png)
 
 ---
 
@@ -403,7 +401,42 @@ PS C:\Users\Admin\source\repos\Task6\PE06_Reflective_DLL_Injection\x64\Release>C
 
 ```
 
+
+### 💻 PE 06: Reflective DLL Injection (Fileless Memory Injection)
+
+**Bản chất kỹ thuật:** Thẩm định khả năng nạp và ánh xạ một file DLL hoàn chỉnh trực tiếp từ bộ nhớ ảo (In-Memory Execution) mà không để lại vết tệp đĩa thô hay thông điệp nạp mô-đun chuẩn. Khi tiêm phản chiếu thành công, do không dùng hàm hệ thống `LoadLibrary`, tệp `PandaDLL.dll` sẽ **hoàn toàn biến mất** khỏi tab Modules của `notepad.exe`. Thay vào đó, nó ẩn mình dưới dạng một phân vùng bộ nhớ `Private` mang đặc quyền `RWX` có cấu trúc tệp PE hoàn chỉnh.
+
+**Quy trình kiểm tra bằng System Informer:**
+
+1. Mở sẵn một cửa sổ `notepad.exe` sạch.
+
+2. Khởi chạy file thực thi `Reflective_DLL_Injection.exe`. Cửa sổ `calc.exe` bật lên và màn hình Console dừng lại ở thông báo: `[*] Hoan thanh quy trinh. Nhan Enter de dong cua so...`. **giữ nguyên không nhấn Enter.**
+
+![](_assets/Pasted%20image%2020260617131511.png)
+
+2. Ghi lại tọa độ vùng nhớ Image được in trên màn hình Console (Ví dụ: `[+] Vung nho Image tu xa da thiet lap tai: 0x0000000180000000`).
+
+![](_assets/Pasted%20image%2020260617131543.png)
+
+3. Vào System Informer $\rightarrow$ Nhấn đúp vào tiến trình **`notepad.exe`** mục tiêu.
+
+4. **Chỉ dấu đúng bản chất (Săn lùng Fileless Artifacts):**
+
+- **Kiểm tra tab Modules (Chứng minh tính vô hình):** tìm kiếm tên tệp `PandaDLL.dll` bên trong danh sách này. Kết quả chuẩn kỹ thuật là **không tìm thấy**. Điều này chứng minh giải thuật đã qua mặt hoàn toàn cơ chế đăng ký mô-đun của hệ điều hành.
+
+![](_assets/Pasted%20image%2020260617131628.png)
+
+- **Kiểm tra tab Memory (Bóc trần vết RAM):** Cuộn danh sách tìm đúng địa chỉ Base Address trùng khớp với mã Hex được in ra. Dòng này phải hiển thị đặc quyền **`Type: Private`** và **`Protection: RWX`**.
+
+![](_assets/Pasted%20image%2020260617131724.png)
+
+![](_assets/Pasted%20image%2020260617131708.png)
+
+- Nhấn đúp vào phân vùng này, chọn tab **Hex**. sẽ nhìn thấy dấu vết cấu trúc PE lộ thiên bao gồm hai ký tự ma thuật đầu tiên là **`MZ`** (`0x4D 0x5A`) cùng chuỗi thông báo mặc định của PE Header: `This program cannot be run in DOS mode`.
+
+![](_assets/Pasted%20image%2020260617131823.png)
+
 ### Demo
-<img width="1920" height="600" alt="devenv_67R8Zjb7DL" src="https://github.com/user-attachments/assets/21313e99-4406-4ef5-b30b-f614a66a2cf8" />
+![](_assets/devenv_ebIsDG92SQ.gif)
 
 ---

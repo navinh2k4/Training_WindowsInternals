@@ -114,13 +114,16 @@ int main() {
         std::cerr << "[-] CreateRemoteThread failed! Error: " << GetLastError() << std::endl;
     }
 
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "\n[+] PE Code Injection Process Completed Successfully!" << std::endl;
+    std::cout << "[*] PAUSE: Check System Informer inside 'notepad.exe' Memory Map NOW for RWX!" << std::endl;
+    std::cout << "[*] Press Enter HERE to cleanup after verification..." << std::endl;
+    std::cin.get();
+
     // ─── BƯỚC 4: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
     VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
     CloseHandle(hProcess);
 
-    std::cout << "\n[+] PE Code Injection Process Completed Successfully!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de dong cua so..." << std::endl;
-    std::cin.get();
     return EXIT_SUCCESS;
 }

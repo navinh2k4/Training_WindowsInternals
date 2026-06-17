@@ -72,7 +72,7 @@ int main() {
         std::cin.get();
         return EXIT_FAILURE;
     }
-    std::cout << "[+] Trang nho chứa chuoi duong dan thiet lap tai: 0x" << std::hex << remoteMem << std::endl;
+    std::cout << "[+] Trang nho chua chuoi duong dan thiet lap tai: 0x" << std::hex << remoteMem << std::endl;
 
     // 3. Đẩy chuỗi đường dẫn tệp tin DLL xuyên biên giới sang RAM tiến trình đích
     if (!WriteProcessMemory(hProcess, remoteMem, fullDllPath, dllPathLen, NULL)) {

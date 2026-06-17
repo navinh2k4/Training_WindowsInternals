@@ -31,9 +31,8 @@ Quy trình toán học giải phẫu và ghi đè triệt tiêu ma trận Hook c
                            └──> [RtlCopyMemory: Ghi đè mã sạch, giải thoát tháp API]
 
 ```
-<br>
-<img width="1693" height="2766" alt="image" src="https://github.com/user-attachments/assets/39bbb76f-1291-4862-9c06-c8fd7760d07f" />
 
+![](_assets/Pasted%20image%2020260617084217.png)
 
 1. **Đối chiếu bản đồ cấu trúc PE**: Loader sử dụng hàm `GetModuleHandleA` để trích xuất Base Address đang hoạt động của mô-đun `ntdll.dll` trên bộ nhớ ảo (nơi đã bị EDR ghi đè mã máy gài bẫy Hook). Đồng thời, ứng dụng sử dụng luồng đọc nhị phân hệ thống để kéo toàn bộ tệp tin vật lý `C:\Windows\System32\ntdll.dll` sạch từ ổ đĩa vào một cấu trúc mảng byte cục bộ (`std::vector`).
 2. **Tính toán tịnh tiến phân đoạn**: Giải thuật truy cập vào bảng danh sách phân đoạn (**Section Table**) dựa trên cấu trúc các bản ghi `IMAGE_SECTION_HEADER` của file đĩa thô nhằm săn tìm phân đoạn mang tên định danh **`.text`** (phân vùng chứa mã máy thực thi của toàn bộ Native API). Loader bốc tách hai thông số toán học cốt lõi: `VirtualAddress` (Địa chỉ tương đối RVA) và `Misc.VirtualSize` (Kích thước thực tế của vùng mã máy).
@@ -186,15 +185,18 @@ int main() {
     WaitForSingleObject(hThread, INFINITE);
     std::cout << "[+] Luong Thread chuc nang da hoan thanh chu ky song." << std::endl;
 
+    std::cout << "\n[+] PE 07: NTDLL Unhooked & Code Executed Successfully!" << std::endl;
+
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM VÀ KHÔNG GIAN NTDLL TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "[*] PAUSE: Check System Informer Assembly code inside NTDLL now... Press Enter after verification." << std::endl;
+    std::cin.get();
+
     // 6. Dọn dẹp bộ nhớ triệt để chống rò rỉ tài nguyên hệ thống (Memory Leak)
     CloseHandle(hThread);
     VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
     VirtualFree(pLocalData, 0, MEM_RELEASE);
     std::cout << "[+] Quy trinh giai phong RAM hoan tat." << std::endl;
 
-    std::cout << "\n[+] PE 07: NTDLL Unhooked & Code Executed Successfully!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de ket thuc chuong trinh..." << std::endl;
-    std::cin.get();
     return EXIT_SUCCESS;
 }
 
@@ -236,8 +238,103 @@ PS C:\Users\Admin\source\repos\Task6\PE07_Reflective_DLL_Loading_Lagos_Island\x6
 
 ```
 
+### 🛡️ PE 07: Unhook NTDLL.DLL — Lagos Island
+
+**Bản chất kỹ thuật:** Thẩm định khả năng đọc file `ntdll.dll` sạch từ đĩa thô, bóc tách phân đoạn `.text`, và ghi đè đè bẹp (Stomping) lên phân đoạn `.text` đang chạy trên RAM ảo của tiến trình hiện tại nhằm triệt tiêu hoàn toàn các bẫy `Inline Hook` (lệnh `JMP` rác) của AV/EDR. Sau khi Unhook thành công, mảng byte tại các hàm API hệ thống nhạy cảm (như `NtCreateThreadEx`, `NtAllocateVirtualMemory`) phải được hoàn trả về đúng cấu trúc Stub gốc của Microsoft.
+
+**Quy trình kiểm tra bằng System Informer:**
+
+1. Khởi chạy file thực thi `PE07_Unhook_Lagos_Island.exe` trên môi trường máy Lab (tốt nhất là máy có bật phần mềm AV/EDR đang Hook `ntdll.dll`).
+
+![](_assets/Pasted%20image%2020260617132700.png)
+
+2. Cửa sổ `calc.exe` bật lên và màn hình Console dừng lại ở thông báo `PAUSE`. **Giữ nguyên không nhấn Enter.**
+
+3. Mở **System Informer** $\rightarrow$ Nhấn đúp vào chính tiến trình `PE07_Unhook_Lagos_Island.exe` đang chạy $\rightarrow$ Chuyển sang tab **Modules**.
+
+![](_assets/Pasted%20image%2020260617132809.png)
+
+![](_assets/Pasted%20image%2020260617132818.png)
+
+4. Nhấn đúp vào tệp tin **`ntdll.dll`** trong danh sách Modules $\rightarrow$ Nhấn vào nút **Export** để xem danh sách các hàm hệ thống xuất bản.
+
+![](_assets/Pasted%20image%2020260617132928.png)
+
+5. Tra cứu RVA (Relative Virtual Address) của hàm cần kiểm tra
+
+![](_assets/Pasted%20image%2020260617133632.png)
+
+- Cột **RVA** của hàm `NtCreateThreadEx` đang hiển thị giá trị tọa độ là: **`0x1634f0`** (Ghi nhớ mã Hex này).
+
+6. Đính kèm (Attach) x64dbg vào bài Lab
+- Mở công cụ `x64dbg` phiên bản x64 lên.
+- Trên thanh công cụ phía trên cùng, chọn menu **File** $\rightarrow$ Chọn **Attach** (hoặc nhấn phím tắt **`Alt + A`**).
+- Một bảng danh sách các tiến trình đang chạy trên Windows xuất hiện. Vinh gõ vào ô tìm kiếm tên file của bạn: `PE07_Unhook_Lagos_Island.exe` (hoặc lọc theo PID).
+
+![](_assets/Pasted%20image%2020260617143347.png)
+
+- Chọn đúng tiến trình và nhấn nút Attach ở góc dưới. Lúc này, x64dbg sẽ nhảy vào lòng mã độc và tạm thời đóng băng toàn bộ luồng CPU để phục vụ bóc tách.
+
+![](_assets/Pasted%20image%2020260617143405.png)
+
+7. Di chuyển đến Phân Đảo Bộ Nhớ của NTDLL.DLL
+- Trên giao diện chính của x64dbg, nhìn xuống các tab điều hướng bên dưới và chuyển sang tab Memory Map (Bản đồ bộ nhớ).
+
+![](_assets/Pasted%20image%2020260617143424.png)
+
+- Sắp xếp danh sách theo cột _Party_ hoặc _Name_, cuộn xuống và tìm kiếm phân đoạn mã máy thực thi mang tên **`ntdll.dll`**.
+
+![](_assets/Pasted%20image%2020260617143503.png)
+
+- **Thao tác chiến lược:** tìm đúng dòng của `ntdll.dll` có cột **Protection** ghi thuộc tính là **`ER`** (Execute - Read / Tương đương cờ `PAGE_EXECUTE_READ` trên hệ thống) và cột **Section** ghi rõ tên là **`.text`**.
+
+![](_assets/Pasted%20image%2020260617143533.png)
+
+- Nhấn chuột phải vào dòng `.text` của ntdll.dll đó $\rightarrow$ Chọn **Follow in Disassembler** (hoặc nhấn đúp chuột). Giao diện x64dbg sẽ ngay lập tức nhảy thẳng sang tab CPU, bóc trần toàn bộ mã máy hợp ngữ đang hoạt động bên trong lòng ntdll.
+
+![](_assets/Pasted%20image%2020260617143621.png)
+
+8. Săn lùng Syscall Stub sạch của `NtCreateThreadEx`
+- Tại giao diện tab CPU vừa nhảy sang, nhấn tổ hợp phím tắt **`Ctrl + G`** (Go to expression).
+- Nhập chính xác tên hàm Native API tối cao mà cần thẩm định vào ô tìm kiếm: **`NtCreateThreadEx`** (hoặc `NtAllocateVirtualMemory`) $\rightarrow$ Nhấn **Enter**. Trình dịch ngược mã máy của x64dbg sẽ đưa con trỏ Rip ảo nhảy đến vạch xuất phát của hàm.
+
+![](_assets/Pasted%20image%2020260617143708.png)
+
+![](_assets/Pasted%20image%2020260617143723.png)
+
+### Hai Kịch Bản Đối Chiếu Chỉ Dấu 
+
+Lúc này, nhìn trực diện vào các dòng lệnh Assembly (Hợp ngữ) tại tọa độ vừa tìm được để đối chiếu bản chất kỹ thuật:
+
+### 🟢 Kịch bản A (Unhook THÀNH CÔNG)
+
+Nếu giải thuật đọc file thô đè remap chính xác, các dòng lệnh hợp ngữ tại đầu hàm bắt buộc phải hiển thị cấu trúc Stub phẳng sạch nguyên bản của Microsoft giống như hình dưới đây:
+
+```assembly
+mov r10, rcx
+mov eax, <Mã_số_Syscall>   ; Ví dụ: 0C2h tùy phiên bản  Windows
+syscall
+ret
+```
+
+> _Dấu hiệu thành công:_ Cấu trúc này không chứa bất kỳ lệnh nhảy `JMP` lạ nào. Nó chứng minh toàn bộ bẫy Hook ăn cắp dòng chảy CPU của AV/EDR đã bị hàm `RtlCopyMemory` của Vinh đè nát và khôi phục về trạng thái nguyên thủy.
+
+![](_assets/Pasted%20image%2020260617143820.png)
+
+### 🔴 Kịch bản B (Bị EDR Hook - Trường hợp khi chưa chạy Unhook):
+
+Nếu một tiến trình thông thường bị EDR giám sát, dòng đầu tiên của hàm sẽ biến mất và bị ghi đè thô bạo thành:
+
+```assembly
+jmp <Địa_chỉ_vùng_nhớ_của_EDR_Module>
+nop
+nop
+```
+
+=> Thì theo hình ảnh minh họa thì chắc chắn rồi chúng ta đã đến với Kịch bản A.
+
 ### Demo:
-<img width="1920" height="600" alt="devenv_R6k0rr98K7" src="https://github.com/user-attachments/assets/3fd349b6-e425-4421-835b-e9b645bb5efd" />
+![](_assets/devenv_ar90n6jHQa.gif)
 
 
 ---

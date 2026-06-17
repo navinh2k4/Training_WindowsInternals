@@ -66,7 +66,7 @@ int main() {
     strcpy_s(pLocalData->szCommand, "cmd.exe /c start calc");
     pLocalData->pMasterFiber = mainFiber;
 
-    std::cout << "[+] Dong bo cau truc du lieu tham so vao RAM vùa cap phat." << std::endl;
+    std::cout << "[+] Dong bo cau truc du lieu tham so vao RAM vua cap phat." << std::endl;
 
     // Bước 4: Tạo ra một Worker Fiber phụ trỏ thẳng vào vạch xuất phát của phân vùng mã máy
     workerFiber = CreateFiber(0, (LPFIBER_START_ROUTINE)codeBuffer, pLocalData);

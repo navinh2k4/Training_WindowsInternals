@@ -1,7 +1,0 @@
-<Solution>
-  <Configurations>
-    <Platform Name="x64" />
-    <Platform Name="x86" />
-  </Configurations>
-  <Project Path="PE18_PEB_Walk_&amp;_APIs_Obfuscation/PE18_PEB_Walk_&amp;_APIs_Obfuscation.vcxproj" Id="01646e3b-a15b-49cb-a7d0-30980448158b" />
-</Solution>

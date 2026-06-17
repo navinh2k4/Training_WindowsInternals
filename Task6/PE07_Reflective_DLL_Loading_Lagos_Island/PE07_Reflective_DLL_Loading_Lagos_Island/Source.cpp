@@ -138,14 +138,17 @@ int main() {
     WaitForSingleObject(hThread, INFINITE);
     std::cout << "[+] Luong Thread chuc nang da hoan thanh chu ky song." << std::endl;
 
+    std::cout << "\n[+] PE 07: NTDLL Unhooked & Code Executed Successfully!" << std::endl;
+
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM VÀ KHÔNG GIAN NTDLL TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "[*] PAUSE: Check System Informer Assembly code inside NTDLL now... Press Enter after verification." << std::endl;
+    std::cin.get();
+
     // 6. Dọn dẹp bộ nhớ triệt để chống rò rỉ tài nguyên hệ thống (Memory Leak)
     CloseHandle(hThread);
     VirtualFree(localCodeBuffer, 0, MEM_RELEASE);
     VirtualFree(pLocalData, 0, MEM_RELEASE);
     std::cout << "[+] Quy trinh giai phong RAM hoan tat." << std::endl;
 
-    std::cout << "\n[+] PE 07: NTDLL Unhooked & Code Executed Successfully!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de ket thuc chuong trinh..." << std::endl;
-    std::cin.get();
     return EXIT_SUCCESS;
 }

