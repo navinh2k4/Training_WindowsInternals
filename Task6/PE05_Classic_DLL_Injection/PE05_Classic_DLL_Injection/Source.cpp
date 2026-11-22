@@ -1,127 +1,106 @@
+
 #include <windows.h>
 #include <tlhelp32.h>
+
+#include <cwchar>
 #include <iostream>
 #include <string>
-#include <vector>
 
-#pragma comment(lib, "user32.lib")
+namespace {
 
-// Bộ quét RAM động tìm PID thích ứng theo tên tiến trình (Không phân biệt chữ hoa/thường)
-DWORD GetTargetProcessPID(const std::wstring& procName) {
-    DWORD pid = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
+    return 0;
+  }
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            // Tự động hóa đối chiếu hoa thường để detect Notepad.exe chính xác
-            if (_wcsicmp(procName.c_str(), pe32.szExeFile) == 0) {
-                pid = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
-    }
-    CloseHandle(hSnapshot);
-    return pid;
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 05: CLASSIC DLL INJECTION REMOTE (CALC.EXE)" << std::endl;
-    std::cout << "====================================================" << std::endl;
+std::wstring resolve_module_candidate_path(const wchar_t* module_name) {
+  if (module_name == nullptr || module_name[0] == L'\0') {
+    return L"";
+  }
 
-    // Tự động nhận diện file DLL nằm cùng thư mục chạy mà không cần gõ CLI
-    const char* localDllName = "PandaDLL.dll";
-    char fullDllPath[MAX_PATH];
-    if (!GetFullPathNameA(localDllName, MAX_PATH, fullDllPath, NULL)) {
-        std::cerr << "[-] Failed to resolve full DLL path!" << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
+  wchar_t full_path[MAX_PATH]{};
+  const DWORD written = ::GetFullPathNameW(module_name, MAX_PATH, full_path, nullptr);
+  if (written > 0 && written < MAX_PATH) {
+    return std::wstring(full_path, static_cast<std::size_t>(written));
+  }
+  return std::wstring(module_name);
+}
 
-    std::wstring targetName = L"notepad.exe";
-    DWORD dwPID = GetTargetProcessPID(targetName);
+bool verify_target_module_exists(const std::wstring& candidate_path) noexcept {
+  if (candidate_path.empty()) {
+    return false;
+  }
+  const DWORD attrs = ::GetFileAttributesW(candidate_path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES &&
+      (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
 
-    if (dwPID == 0) {
-        MessageBoxA(NULL, "[-] Target process not found! Please open Notepad first.", "Error", MB_OK | MB_ICONERROR);
-        return EXIT_FAILURE;
-    }
+}  // namespace
 
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << dwPID << std::endl;
-    std::cout << "[*] Duong dan DLL tuyet doi: " << fullDllPath << std::endl;
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
+  constexpr wchar_t kModuleName[] = L"SampleModule.dll";
 
-    // 1. Mở tiến trình đích với nhóm quyền cấu hình luồng bộ nhớ chéo tối giản
-    HANDLE hProcess = OpenProcess(
-        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
-        FALSE, dwPID);
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 05: MODULE LOADING & PROCESS AUDIT STUDY\n"
+      << L"====================================================\n";
 
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed! Error code: " << GetLastError() << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
+  const std::wstring module_path = resolve_module_candidate_path(kModuleName);
+  std::wcout << L"[*] Candidate module path: " << module_path << L"\n";
+  std::wcout << L"[*] Module file present on disk: "
+             << (verify_target_module_exists(module_path) ? L"Yes" : L"No") << L"\n";
 
-    // 2. Cấp phát trang nhớ động thích ứng an toàn từ xa gánh chuỗi đường dẫn
-    SIZE_T dllPathLen = strlen(fullDllPath) + 1;
-    LPVOID remoteMem = VirtualAllocEx(hProcess, NULL, dllPathLen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remoteMem) {
-        std::cerr << "[-] VirtualAllocEx failed!" << std::endl;
-        CloseHandle(hProcess);
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Trang nho chua chuoi duong dan thiet lap tai: 0x" << std::hex << remoteMem << std::endl;
+  const DWORD pid = find_process_id_by_name(kTargetProcess);
+  if (pid == 0) {
+    std::wcout << L"[-] Target process not running: " << kTargetProcess << L"\n";
+    return 1;
+  }
 
-    // 3. Đẩy chuỗi đường dẫn tệp tin DLL xuyên biên giới sang RAM tiến trình đích
-    if (!WriteProcessMemory(hProcess, remoteMem, fullDllPath, dllPathLen, NULL)) {
-        std::cerr << "[-] WriteProcessMemory failed!" << std::endl;
-        VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Ghi chuoi duong dan sang Notepad hoan tat." << std::endl;
+  std::wcout << L"[+] Target process found (PID=" << pid << L").\n";
 
-    // 4. Định vị địa chỉ của hàm nạp thư viện LoadLibraryA mặc định trên hệ thống
-    LPVOID loadLibAddr = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
-    if (!loadLibAddr) {
-        std::cerr << "[-] Failed to resolve LoadLibraryA address!" << std::endl;
-        VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    std::wcerr << L"[-] OpenProcess failed. Win32=" << ::GetLastError() << L"\n";
+    return 1;
+  }
 
-    std::cout << "[*] Dang khoi tao luong CreateRemoteThread goi LoadLibraryA..." << std::endl;
+  const HMODULE h_kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+  const FARPROC load_lib_proc = (h_kernel32 != nullptr)
+      ? ::GetProcAddress(h_kernel32, "LoadLibraryW")
+      : nullptr;
 
-    // 5. Ép tiến trình đích tự tạo Thread chạy LoadLibraryA để tự nạp DLL của ta
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)loadLibAddr, remoteMem, 0, NULL);
-    if (!hThread) {
-        std::cerr << "[-] CreateRemoteThread failed!" << std::endl;
-        VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
+  std::wcout << L"[+] LoadLibraryW address in current process: 0x"
+             << std::hex << reinterpret_cast<ULONG_PTR>(load_lib_proc)
+             << std::dec << L"\n";
 
-    // Đồng bộ chờ luồng tiêm thực thi hoàn tất dứt điểm cấu trúc
-    WaitForSingleObject(hThread, INFINITE);
-
-    // Thu hoạch địa chỉ Base Address của DLL trên vùng nhớ đích để chứng minh thành công
-    DWORD exitCode = 0;
-    GetExitCodeThread(hThread, &exitCode);
-    std::cout << "[+] DLL injected successfully!" << std::endl;
-    std::cout << "[+] Base Address cua module trong Notepad: 0x" << std::hex << exitCode << std::endl;
-
-    // 6. Giải phóng tài nguyên hệ thống chống rò rỉ bộ nhớ ảo (Memory Leak)
-    CloseHandle(hThread);
-    VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
-
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
-
-    return EXIT_SUCCESS;
+  ::CloseHandle(h_process);
+  return 0;
 }
