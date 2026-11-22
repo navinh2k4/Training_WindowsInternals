@@ -1,161 +1,196 @@
+
 #include <windows.h>
-#include <tlhelp32.h>
 #include <psapi.h>
-#include <wtsapi32.h>     // Thư viện WinAPI quản lý Session chuyên sâu
-#include <iostream>
-#include <iomanip>
-#include <string>
-#include <vector>
-#include <io.h>
+#include <tlhelp32.h>
+#include <wtsapi32.h>
+
 #include <fcntl.h>
+#include <io.h>
 
-#pragma comment(lib, "wtsapi32.lib") // Liên kết thư viện truy vấn Session hệ thống
+#include <cstddef>
+#include <iomanip>
+#include <iostream>
+#include <string>
 
-using namespace std;
+#pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "wtsapi32.lib")
 
-const int COL_NAME_WIDTH = 25;
-const int COL_PID_WIDTH = 8;
-const int COL_SESSION_NAME_WIDTH = 16;
-const int COL_SESSION_ID_WIDTH = 11;
-const int COL_MEM_WIDTH = 12;
+namespace {
 
-// Hàm 1: Chỉ làm nhiệm vụ khởi tạo Snapshot từ nhân Kernel
-HANDLE CreateSystemSnapshot() {
-    return CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+constexpr int kColNameWidth = 25;
+constexpr int kColPidWidth = 8;
+constexpr int kColSessionNameWidth = 16;
+constexpr int kColSessionIdWidth = 11;
+constexpr int kColMemWidth = 12;
+
+HANDLE create_system_snapshot() noexcept {
+  return ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 }
 
-// Hàm 2: Chỉ làm nhiệm vụ lấy tiến trình đầu tiên
-bool GetFirstProcessRecord(HANDLE hSnapshot, PROCESSENTRY32W& entry) {
-    entry.dwSize = sizeof(PROCESSENTRY32W);
-    return Process32FirstW(hSnapshot, &entry) != FALSE;
+bool get_first_process_record(
+    HANDLE h_snapshot,
+    PROCESSENTRY32W& entry) noexcept {
+  entry = {};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+  return ::Process32FirstW(h_snapshot, &entry) != FALSE;
 }
 
-// Hàm 3: Chỉ làm nhiệm vụ nhảy sang tiến trình tiếp theo
-bool GetNextProcessRecord(HANDLE hSnapshot, PROCESSENTRY32W& entry) {
-    return Process32NextW(hSnapshot, &entry) != FALSE;
+bool get_next_process_record(
+    HANDLE h_snapshot,
+    PROCESSENTRY32W& entry) noexcept {
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+  return ::Process32NextW(h_snapshot, &entry) != FALSE;
 }
 
-// Hàm 4: Chỉ làm nhiệm vụ bóc tách dung lượng RAM thực tế của 1 PID
-SIZE_T GetProcessWorkingSetSizeBytes(DWORD pid) {
-    SIZE_T workingSetBytes = 0;
-    // Sử dụng cờ tối thiểu PROCESS_QUERY_LIMITED_INFORMATION để tăng hiệu năng phòng thủ quyền hạn
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-
-    if (hProcess != NULL) {
-        PROCESS_MEMORY_COUNTERS pmc;
-        pmc.cb = sizeof(PROCESS_MEMORY_COUNTERS);
-        if (GetProcessMemoryInfo(hProcess, &pmc, sizeof(pmc))) {
-            workingSetBytes = pmc.WorkingSetSize;
-        }
-        CloseHandle(hProcess);
-    }
-    return workingSetBytes;
-}
-
-// Hàm 5: Truy vấn tên Session thực tế từ Object Manager của OS
-wstring GetWindowsSessionName(DWORD sessionId) {
-    LPWSTR pSessionName = NULL;
-    DWORD bytesReturned = 0;
-    wstring result = L"N/A";
-
-    // Gọi API chuyên dụng của Windows 
-    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessionId, WTSWinStationName, &pSessionName, &bytesReturned)) {
-        if (pSessionName != NULL && wcslen(pSessionName) > 0) { 
-            result = pSessionName;
-        }
-        WTSFreeMemory(pSessionName); // Giải phóng vùng nhớ do WinAPI tự cấp phát động
-    }
-
-    // Fallback chuẩn theo hành vi của lệnh tasklist gốc khi gặp Session rỗng
-    if (result == L"N/A" || result.empty()) {
-        result = (sessionId == 0) ? L"Services" : L"Console";
-    }
-    return result;
-}
-
-// Hàm 6: Chỉ làm nhiệm vụ chia tách hàng nghìn bằng toán học chuỗi
-wstring FormatBytesToKBString(SIZE_T byteSize) {
-    SIZE_T memKB = byteSize / 1024;
-    wstring s = to_wstring(memKB);
-    for (int i = (int)s.length() - 3; i > 0; i -= 3) {
-        s.insert(i, L",");
-    }
-    return s + L" K";
-}
-
-// Hàm 7: Chỉ làm nhiệm vụ xử lý co giãn, cắt tỉa tên tiến trình để chống vỡ lề CLI
-wstring TruncateProcessName(const wstring& originalName, size_t maxWidth) {
-    if (originalName.length() > maxWidth) {
-        return originalName.substr(0, maxWidth - 3) + L"...";
-    }
-    return originalName;
-}
-
-// Hàm 8: Chỉ làm nhiệm vụ in Header bảng
-void PrintTasklistHeader() {
-    wcout << left << setw(COL_NAME_WIDTH) << L"Image Name"
-        << right << setw(COL_PID_WIDTH) << L"PID "
-        << left << setw(COL_SESSION_NAME_WIDTH) << L"  Session Name"
-        << right << setw(COL_SESSION_ID_WIDTH) << L"Session#"
-        << right << setw(COL_MEM_WIDTH) << L"  Mem Usage\n"
-        << L"========================= ======= ================ ========== ============\n";
-}
-
-// Hàm 9: Chỉ làm nhiệm vụ format đúng vị trí phân phối dòng dữ liệu thô
-void PrintProcessRowData(const wstring& name, DWORD pid, const wstring& sessionName, DWORD sessionId, const wstring& memoryStr) {
-    wcout << left << setw(COL_NAME_WIDTH) << name
-        << right << setw(COL_PID_WIDTH) << pid << L" "
-        << left << setw(COL_SESSION_NAME_WIDTH) << sessionName
-        << right << setw(COL_SESSION_ID_WIDTH) << sessionId
-        << right << setw(COL_MEM_WIDTH) << memoryStr << L"\n";
-}
-
-// Hàm 10: Hàm xử lý trung gian, nhận bản ghi thô, ra lệnh bóc tách cho các hàm con và đẩy ra bộ in
-void ProcessSingleRecord(const PROCESSENTRY32W& processEntry) {
-    DWORD pid = processEntry.th32ProcessID;
-
-    // 1. Đo Đạc Session bằng WinAPI chuyên biệt
-    DWORD sessionId = 0;
-    ProcessIdToSessionId(pid, &sessionId);
-    wstring sessionName = GetWindowsSessionName(sessionId);
-
-    // 2. Quét RAM và xử lý định dạng văn bản thích ứng
-    SIZE_T memoryBytes = GetProcessWorkingSetSizeBytes(pid);
-    wstring formattedMem = FormatBytesToKBString(memoryBytes);
-    wstring cleanName = TruncateProcessName(processEntry.szExeFile, COL_NAME_WIDTH);
-
-    // 3. Đẩy sang hàm hiển thị chuyên biệt
-    PrintProcessRowData(cleanName, pid, sessionName, sessionId, formattedMem);
-}
-
-// Hàm 11: Chỉ làm nhiệm vụ điều phối luồng vòng lặp dữ liệu trên toàn bộ Snapshot
-void ExecuteProcessSieve() {
-    HANDLE hSnapshot = CreateSystemSnapshot();
-
-    if (hSnapshot == INVALID_HANDLE_VALUE) {
-        wcerr << L"Loi: Khong the khoi tao Snapshot. Ma loi: " << GetLastError() << L"\n";
-        return;
-    }
-
-    PROCESSENTRY32W processEntry;
-
-    if (GetFirstProcessRecord(hSnapshot, processEntry)) {
-        do {
-            ProcessSingleRecord(processEntry);
-        } while (GetNextProcessRecord(hSnapshot, processEntry));
-    }
-    else {
-        wcerr << L"Loi: Khong the truy vấn ban ghi tien trinh dau tien.\n";
-    }
-
-    CloseHandle(hSnapshot); // Giải phóng thẻ Handle hệ thống
-}
-
-int main() {
-    _setmode(_fileno(stdout), _O_U16TEXT); // Bật Unicode UTF-16
-
-    PrintTasklistHeader();
-    ExecuteProcessSieve();
-
+SIZE_T get_process_working_set_bytes(DWORD pid) noexcept {
+  if (pid == 0) {
     return 0;
+  }
+
+  // PROCESS_QUERY_LIMITED_INFORMATION works across protected/system processes
+  // without requiring unnecessary full VM read privileges.
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    return 0;
+  }
+
+  SIZE_T working_set_bytes = 0;
+  PROCESS_MEMORY_COUNTERS pmc{};
+  pmc.cb = static_cast<DWORD>(sizeof(PROCESS_MEMORY_COUNTERS));
+  if (::GetProcessMemoryInfo(
+          h_process,
+          &pmc,
+          static_cast<DWORD>(sizeof(pmc))) != FALSE) {
+    working_set_bytes = pmc.WorkingSetSize;
+  }
+
+  ::CloseHandle(h_process);
+  return working_set_bytes;
+}
+
+std::wstring get_windows_session_name(DWORD session_id) {
+  LPWSTR p_session_name = nullptr;
+  DWORD bytes_returned = 0;
+  std::wstring result;
+
+  if (::WTSQuerySessionInformationW(
+          WTS_CURRENT_SERVER_HANDLE,
+          session_id,
+          WTSWinStationName,
+          &p_session_name,
+          &bytes_returned) != FALSE) {
+    if (p_session_name != nullptr && p_session_name[0] != L'\0') {
+      result.assign(p_session_name);
+    }
+    if (p_session_name != nullptr) {
+      ::WTSFreeMemory(p_session_name);
+      p_session_name = nullptr;
+    }
+  }
+
+  if (result.empty()) {
+    result = (session_id == 0) ? L"Services" : L"Console";
+  }
+  return result;
+}
+
+std::wstring format_bytes_to_kb_string(SIZE_T byte_size) {
+  const SIZE_T mem_kb = byte_size / 1024U;
+  std::wstring s = std::to_wstring(mem_kb);
+  for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) {
+    s.insert(static_cast<std::size_t>(i), L",");
+  }
+  return s + L" K";
+}
+
+std::wstring truncate_process_name(
+    const wchar_t* raw_name,
+    std::size_t max_width) {
+  std::wstring original_name(raw_name != nullptr ? raw_name : L"");
+  if (max_width > 3 && original_name.size() > max_width) {
+    return original_name.substr(0, max_width - 3) + L"...";
+  }
+  return original_name;
+}
+
+void print_tasklist_header() {
+  std::wcout
+      << std::left << std::setw(kColNameWidth) << L"Image Name"
+      << std::right << std::setw(kColPidWidth) << L"PID "
+      << std::left << std::setw(kColSessionNameWidth) << L"  Session Name"
+      << std::right << std::setw(kColSessionIdWidth) << L"Session#"
+      << std::right << std::setw(kColMemWidth) << L"  Mem Usage\n"
+      << L"========================= ======= ================ ========== ============\n";
+}
+
+void print_process_row_data(
+    const std::wstring& name,
+    DWORD pid,
+    const std::wstring& session_name,
+    DWORD session_id,
+    const std::wstring& memory_str) {
+  std::wcout
+      << std::left << std::setw(kColNameWidth) << name
+      << std::right << std::setw(kColPidWidth) << pid << L" "
+      << std::left << std::setw(kColSessionNameWidth) << session_name
+      << std::right << std::setw(kColSessionIdWidth) << session_id
+      << std::right << std::setw(kColMemWidth) << memory_str << L"\n";
+}
+
+void process_single_record(const PROCESSENTRY32W& process_entry) {
+  const DWORD pid = process_entry.th32ProcessID;
+
+  DWORD session_id = 0;
+  if (::ProcessIdToSessionId(pid, &session_id) == FALSE) {
+    session_id = 0;
+  }
+  const std::wstring session_name = get_windows_session_name(session_id);
+
+  const SIZE_T memory_bytes = get_process_working_set_bytes(pid);
+  const std::wstring formatted_mem = format_bytes_to_kb_string(memory_bytes);
+  const std::wstring clean_name = truncate_process_name(
+      process_entry.szExeFile,
+      static_cast<std::size_t>(kColNameWidth));
+
+  print_process_row_data(clean_name, pid, session_name, session_id, formatted_mem);
+}
+
+int execute_process_sieve() {
+  const HANDLE h_snapshot = create_system_snapshot();
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    const DWORD err = ::GetLastError();
+    std::wcerr << L"Error: Failed to create process snapshot. Win32=" << err << L"\n";
+    return (err != ERROR_SUCCESS) ? static_cast<int>(err) : static_cast<int>(ERROR_ACCESS_DENIED);
+  }
+
+  PROCESSENTRY32W process_entry{};
+  if (get_first_process_record(h_snapshot, process_entry)) {
+    do {
+      process_single_record(process_entry);
+    } while (get_next_process_record(h_snapshot, process_entry));
+  } else {
+    const DWORD err = ::GetLastError();
+    std::wcerr << L"Error: Failed to read first process record. Win32=" << err << L"\n";
+  }
+
+  const DWORD end_err = ::GetLastError();
+  ::CloseHandle(h_snapshot);
+
+  if (end_err != ERROR_NO_MORE_FILES && end_err != ERROR_SUCCESS) {
+    return static_cast<int>(end_err);
+  }
+  return 0;
+}
+
+}  // namespace
+
+int wmain() {
+  _setmode(_fileno(stdout), _O_U16TEXT);
+  _setmode(_fileno(stderr), _O_U16TEXT);
+
+  print_tasklist_header();
+  return execute_process_sieve();
 }
