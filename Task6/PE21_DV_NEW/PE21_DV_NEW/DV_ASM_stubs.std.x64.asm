@@ -1,25 +1,25 @@
 .code
 
-; Cong goi truc tiep NtCreateSection
+; Call NtCreateSection
 NtCreateSectionProc proc
     mov r10, rcx
-    mov eax, 4Ah          ; Syscall Number Mac dinh cua NtCreateSection xuong Kernel
+    mov eax, 4Ah          ; Syscall Number default of NtCreateSection downto Kernel
     syscall
     ret
 NtCreateSectionProc endp
 
-; Cong goi truc tiep NtMapViewOfSection (Da fix dong bo ten ham Flat)
+; Call NtMapViewOfSection 
 NtMapViewOfSectionProc proc
     mov r10, rcx
-    mov eax, 28h          ; Syscall Number Mac dinh cua NtMapViewOfSection xuong Kernel
+    mov eax, 28h          ; Syscall Number default of NtMapViewOfSection downto Kernel
     syscall
     ret
 NtMapViewOfSectionProc endp
 
-; Cong goi truc tiep NtCreateThreadEx
+; Call NtCreateThreadEx
 NtCreateThreadExProc proc
     mov r10, rcx
-    mov eax, 0C1h         ; Syscall Number Mac dinh cua NtCreateThreadEx xuong Kernel
+    mov eax, 0C1h         ; Syscall Number default of NtCreateThreadEx downto Kernel
     syscall
     ret
 NtCreateThreadExProc endp
