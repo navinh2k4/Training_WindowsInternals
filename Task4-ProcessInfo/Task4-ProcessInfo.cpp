@@ -1,534 +1,789 @@
+
 #include <winsock2.h>
 #include <windows.h>
-#include <tlhelp32.h>
 #include <psapi.h>
-#include <iostream>
+#include <tlhelp32.h>
+
+#include <fcntl.h>
+#include <io.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cwchar>
 #include <iomanip>
+#include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <sstream>
-#include <io.h>
-#include <fcntl.h>
-#include <algorithm>  
 
-using namespace std;
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "psapi.lib")
 
-// ========================================================================
-// TẦNG CẤU HÌNH ĐỊNH DẠNG (CONFIGURATION LAYER)
-// ========================================================================
-const int LAYOUT_WIDTH = 43;
-const int COL_LABEL_WIDTH = 19;
+namespace {
 
-typedef struct _UNICODE_STRING {
-    USHORT Length;
-    USHORT MaximumLength;
-    PWSTR  Buffer;
-} UNICODE_STRING, * PUNICODE_STRING;
+constexpr int kLayoutWidth = 43;
+constexpr int kMaxPathRetryAttempts = 6;
 
-typedef LONG NTSTATUS;
-typedef struct _PROCESS_BASIC_INFORMATION {
-    NTSTATUS ExitStatus;
-    PVOID PebBaseAddress;
-    ULONG_PTR AffinityMask;
-    LONG BasePriority;
-    ULONG_PTR UniqueProcessId;
-    ULONG_PTR InheritedFromUniqueProcessId;
-} PROCESS_BASIC_INFORMATION;
+using NTSTATUS = LONG;
 
-typedef NTSTATUS(WINAPI* NtQueryInformationProcessPtr)(
-    HANDLE, DWORD, PVOID, ULONG, PULONG
-    );
-
-struct PrivilegeRecord {
-    std::wstring name;
-    std::wstring state;
+struct UNICODE_STRING_RAW final {
+  USHORT Length;
+  USHORT MaximumLength;
+  PWSTR Buffer;
 };
 
-struct ModuleRecord {
-    std::wstring name;
-    std::wstring fullPath;
-    PVOID baseAddress;
-    DWORD size;
+struct PROCESS_BASIC_INFORMATION_RAW final {
+  NTSTATUS ExitStatus;
+  PVOID PebBaseAddress;
+  ULONG_PTR AffinityMask;
+  LONG BasePriority;
+  ULONG_PTR UniqueProcessId;
+  ULONG_PTR InheritedFromUniqueProcessId;
 };
 
-struct ThreadRecord {
-    DWORD id;
-    LONG priority;
-    std::wstring status;
+using NtQueryInformationProcessFn = NTSTATUS(WINAPI*)(
+    HANDLE ProcessHandle,
+    DWORD ProcessInformationClass,
+    PVOID ProcessInformation,
+    ULONG ProcessInformationLength,
+    PULONG ReturnLength);
+
+struct privilege_record final {
+  std::wstring name;
+  std::wstring state;
 };
 
-struct ProcessToolhelpCore {
-    DWORD parentPid;
-    DWORD threadCount;
-    bool found;
+struct module_record final {
+  std::wstring name;
+  std::wstring full_path;
+  PVOID base_address = nullptr;
+  DWORD size = 0;
 };
 
-// ========================================================================
-// 1. TẦNG TRÍCH XUẤT DỮ LIỆU THÔ WINAPI THUẦN (LOW-LEVEL EXTRACTORS - ATOMIC)
-// ========================================================================
+struct thread_record final {
+  DWORD id = 0;
+  LONG priority = 0;
+  std::wstring status;
+};
 
-HANDLE CreateProcessSnapshot() {
-    return CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-}
+struct process_toolhelp_core final {
+  DWORD pid = 0;
+  DWORD parent_pid = 0;
+  DWORD thread_count = 0;
+  bool found = false;
+};
 
-bool GetFirstProcessEntry(HANDLE hSnapshot, PROCESSENTRY32W& entry) {
-    entry.dwSize = sizeof(PROCESSENTRY32W);
-    return Process32FirstW(hSnapshot, &entry) != FALSE;
-}
+bool parse_pid_u32(const wchar_t* text, DWORD& out_pid) noexcept {
+  out_pid = 0;
+  if (text == nullptr || text[0] == L'\0') {
+    return false;
+  }
 
-bool GetNextProcessEntry(HANDLE hSnapshot, PROCESSENTRY32W& entry) {
-    return Process32NextW(hSnapshot, &entry) != FALSE;
-}
-
-// Tuyệt đối dỡ bỏ việc lặp Snapshot, quét DUY NHẤT một vòng để khóa thông số Core
-ProcessToolhelpCore ExtractTargetProcessCoreInfo(DWORD targetPid, const wstring& targetName, bool searchByPid) {
-    ProcessToolhelpCore coreResult = { 0, 0, false };
-    HANDLE hSnapshot = CreateProcessSnapshot();
-    if (hSnapshot == INVALID_HANDLE_VALUE) return coreResult;
-
-    PROCESSENTRY32W pe;
-    if (GetFirstProcessEntry(hSnapshot, pe)) {
-        do {
-            bool match = searchByPid ? (pe.th32ProcessID == targetPid) : (_wcsicmp(pe.szExeFile, targetName.c_str()) == 0);
-            if (match) {
-                coreResult.parentPid = pe.th32ParentProcessID;
-                coreResult.threadCount = pe.cntThreads;
-                coreResult.found = true;
-                if (!searchByPid) {
-                    SetLastError(pe.th32ProcessID); // Đồng bộ PID thông qua API Error channel
-                }
-                break;
-            }
-        } while (GetNextProcessEntry(hSnapshot, pe));
+  unsigned long acc = 0;
+  for (std::size_t i = 0; text[i] != L'\0'; ++i) {
+    const wchar_t ch = text[i];
+    if (ch < L'0' || ch > L'9') {
+      return false;
     }
-    CloseHandle(hSnapshot);
-    return coreResult;
+    const unsigned long digit = static_cast<unsigned long>(ch - L'0');
+    if (acc > (static_cast<unsigned long>(UINT32_MAX) - digit) / 10UL) {
+      return false;
+    }
+    acc = acc * 10UL + digit;
+  }
+
+  out_pid = static_cast<DWORD>(acc);
+  return true;
 }
 
-wstring GetProcessExecutablePath(HANDLE hProcess) {
-    DWORD size = MAX_PATH;
-    vector<wchar_t> buffer(size);
-    while (QueryFullProcessImageNameW(hProcess, 0, buffer.data(), &size) == 0) {
-        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
-            size *= 2;
-            buffer.resize(size);
-        }
-        else {
-            return L"N/A";
-        }
-    }
-    return wstring(buffer.data());
+HANDLE create_process_snapshot() noexcept {
+  return ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 }
 
-wstring GetProcessCommandLineFromPeb(HANDLE hProcess) {
-    wstring commandLineStr = L"N/A";
-    HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
-    if (!hNtDll) return commandLineStr;
-
-    NtQueryInformationProcessPtr NtQueryInformationProcess =
-        (NtQueryInformationProcessPtr)GetProcAddress(hNtDll, "NtQueryInformationProcess");
-
-    if (NtQueryInformationProcess) {
-        PROCESS_BASIC_INFORMATION pbi;
-        ULONG returnLength = 0;
-        if (NtQueryInformationProcess(hProcess, 0, &pbi, sizeof(pbi), &returnLength) == 0) {
-            ULONG_PTR pebOffset = (sizeof(PVOID) == 8) ? 0x20 : 0x10;
-            PVOID processParametersAddr = NULL;
-
-            if (ReadProcessMemory(hProcess, (PBYTE)pbi.PebBaseAddress + pebOffset, &processParametersAddr, sizeof(PVOID), NULL)) {
-                ULONG_PTR cmdLineOffset = (sizeof(PVOID) == 8) ? 0x70 : 0x40;
-                UNICODE_STRING cmdLineUnicodeStr;
-
-                if (ReadProcessMemory(hProcess, (PBYTE)processParametersAddr + cmdLineOffset, &cmdLineUnicodeStr, sizeof(cmdLineUnicodeStr), NULL)) {
-                    size_t charCount = cmdLineUnicodeStr.Length / sizeof(wchar_t);
-                    vector<wchar_t> cmdBuffer(charCount + 1, L'\0');
-                    if (ReadProcessMemory(hProcess, cmdLineUnicodeStr.Buffer, cmdBuffer.data(), cmdLineUnicodeStr.Length, NULL)) {
-                        commandLineStr = wstring(cmdBuffer.data(), charCount);
-                    }
-                }
-            }
-        }
-    }
-    return commandLineStr;
+bool get_first_process_entry(
+    HANDLE h_snapshot,
+    PROCESSENTRY32W& entry) noexcept {
+  entry = {};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+  return ::Process32FirstW(h_snapshot, &entry) != FALSE;
 }
 
-wstring GetProcessOwnerName(HANDLE hProcess) {
-    wstring ownerName = L"N/A";
-    HANDLE hToken = NULL;
-    if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
-        DWORD tokenSize = 0;
-        GetTokenInformation(hToken, TokenUser, NULL, 0, &tokenSize);
-        if (tokenSize > 0) {
-            vector<BYTE> buffer(tokenSize);
-            PTOKEN_USER pTokenUser = reinterpret_cast<PTOKEN_USER>(buffer.data());
-            if (GetTokenInformation(hToken, TokenUser, pTokenUser, tokenSize, &tokenSize)) {
-                DWORD nameLen = 0, domainLen = 0;
-                SID_NAME_USE sidUse;
-                LookupAccountSidW(NULL, pTokenUser->User.Sid, NULL, &nameLen, NULL, &domainLen, &sidUse);
-
-                if (nameLen > 0 && domainLen > 0) {
-                    vector<wchar_t> nameBuf(nameLen);
-                    vector<wchar_t> domainBuf(domainLen);
-                    if (LookupAccountSidW(NULL, pTokenUser->User.Sid, nameBuf.data(), &nameLen, domainBuf.data(), &domainLen, &sidUse)) {
-                        ownerName = wstring(domainBuf.data()) + L"\\" + wstring(nameBuf.data());
-                    }
-                }
-            }
-        }
-        CloseHandle(hToken);
-    }
-    return ownerName;
+bool get_next_process_entry(
+    HANDLE h_snapshot,
+    PROCESSENTRY32W& entry) noexcept {
+  entry = {};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+  return ::Process32NextW(h_snapshot, &entry) != FALSE;
 }
 
-// ========================================================================
-// HÀM NGUYÊN TỬ: ĐỌC VÀ CHUYỂN ĐỔI GIỜ TẠO TIẾN TRÌNH THEO MÚI GIỜ ĐỊA PHƯƠNG
-// ========================================================================
-wstring GetProcessCreatedTime(HANDLE hProcess) {
-    FILETIME createTimeUTC, exitTime, kernelTime, userTime;
+process_toolhelp_core extract_target_process_core_info(
+    DWORD target_pid,
+    const std::wstring& target_name,
+    bool search_by_pid) {
+  process_toolhelp_core core_result{};
+  const HANDLE h_snapshot = create_process_snapshot();
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return core_result;
+  }
 
-    // Bước 1: Trích xuất mốc thời gian cấu trúc UTC thô từ Kernel Object
-    if (GetProcessTimes(hProcess, &createTimeUTC, &exitTime, &kernelTime, &userTime)) {
-        FILETIME createTimeLocal;
+  PROCESSENTRY32W pe{};
+  if (get_first_process_entry(h_snapshot, pe)) {
+    do {
+      const bool match = search_by_pid
+          ? (pe.th32ProcessID == target_pid)
+          : (::_wcsicmp(pe.szExeFile, target_name.c_str()) == 0);
+      if (match) {
+        core_result.pid = pe.th32ProcessID;
+        core_result.parent_pid = pe.th32ParentProcessID;
+        core_result.thread_count = pe.cntThreads;
+        core_result.found = true;
+        break;
+      }
+    } while (get_next_process_entry(h_snapshot, pe));
+  }
 
-        // Bước 2: Vận dụng WinAPI dịch múi giờ UTC thô sang múi giờ Local thực tế của máy (Bias UTC+7)
-        if (FileTimeToLocalFileTime(&createTimeUTC, &createTimeLocal)) {
-            SYSTEMTIME sysTime;
+  ::CloseHandle(h_snapshot);
+  return core_result;
+}
 
-            // Bước 3: Thông dịch định dạng cấu trúc nhị phân sang định dạng số SYSTEMTIME
-            if (FileTimeToSystemTime(&createTimeLocal, &sysTime)) {
-                wstringstream wss;
-
-                // Định dạng chuỗi văn bản đầu ra ngăn nắp theo cấu trúc form mẫu
-                wss << setfill(L'0') << setw(4) << sysTime.wYear << L"-"
-                    << setw(2) << sysTime.wMonth << L"-" << setw(2) << sysTime.wDay << L" "
-                    << setw(2) << sysTime.wHour << L":" << setw(2) << sysTime.wMinute << L":" << setw(2) << sysTime.wSecond;
-
-                return wss.str();
-            }
-        }
-    }
+std::wstring get_process_executable_path(HANDLE h_process) {
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
     return L"N/A";
-}
+  }
 
-wstring GetProcessArchitecture(HANDLE hProcess) {
-    BOOL isWow64 = FALSE;
-    if (IsWow64Process(hProcess, &isWow64)) {
-        if (isWow64) return L"x86 (32-bit running on 64-bit OS)";
-        SYSTEM_INFO si;
-        GetNativeSystemInfo(&si);
-        if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) return L"x64";
-        if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) return L"x86";
+  DWORD capacity = MAX_PATH;
+  for (int attempt = 0; attempt < kMaxPathRetryAttempts; ++attempt) {
+    wchar_t* buf = static_cast<wchar_t*>(
+        ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, static_cast<std::size_t>(capacity) * sizeof(wchar_t)));
+    if (buf == nullptr) {
+      return L"N/A";
     }
-    return L"Unknown";
+
+    DWORD io_size = capacity;
+    if (::QueryFullProcessImageNameW(h_process, 0, buf, &io_size) != FALSE) {
+      std::wstring result = (io_size > 0) ? std::wstring(buf, static_cast<std::size_t>(io_size)) : L"N/A";
+      ::HeapFree(::GetProcessHeap(), 0, buf);
+      return result;
+    }
+
+    const DWORD err = ::GetLastError();
+    ::HeapFree(::GetProcessHeap(), 0, buf);
+    if (err != ERROR_INSUFFICIENT_BUFFER) {
+      return L"N/A";
+    }
+    capacity *= 2U;
+  }
+
+  return L"N/A";
 }
 
-vector<PrivilegeRecord> ExtractProcessPrivileges(HANDLE hProcess) {
-    vector<PrivilegeRecord> privList;
-    HANDLE hToken = NULL;
-    if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
-        DWORD size = 0;
-        GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &size);
-        if (size > 0) {
-            vector<BYTE> buffer(size);
-            PTOKEN_PRIVILEGES pPrivs = reinterpret_cast<PTOKEN_PRIVILEGES>(buffer.data());
-            if (GetTokenInformation(hToken, TokenPrivileges, pPrivs, size, &size)) {
-                for (DWORD i = 0; i < pPrivs->PrivilegeCount; i++) {
-                    DWORD nameLen = 0;
-                    LookupPrivilegeNameW(NULL, &pPrivs->Privileges[i].Luid, NULL, &nameLen);
-                    if (nameLen > 0) {
-                        vector<wchar_t> privNameBuf(nameLen);
-                        if (LookupPrivilegeNameW(NULL, &pPrivs->Privileges[i].Luid, privNameBuf.data(), &nameLen)) {
-                            PrivilegeRecord rec;
-                            rec.name = privNameBuf.data();
-                            rec.state = (pPrivs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) ? L"Enabled" : L"Disabled";
-                            privList.push_back(rec);
-                        }
-                    }
-                }
-            }
+bool query_peb_basic_info(
+    HANDLE h_process,
+    PROCESS_BASIC_INFORMATION_RAW& out_pbi) noexcept {
+  out_pbi = {};
+  const HMODULE h_ntdll = ::GetModuleHandleW(L"ntdll.dll");
+  if (h_ntdll == nullptr) {
+    return false;
+  }
+
+  const FARPROC raw_proc = ::GetProcAddress(h_ntdll, "NtQueryInformationProcess");
+  if (raw_proc == nullptr) {
+    return false;
+  }
+
+  auto query_fn = reinterpret_cast<NtQueryInformationProcessFn>(raw_proc);
+  ULONG return_length = 0;
+  constexpr DWORD kProcessBasicInformation = 0;
+  const NTSTATUS status = query_fn(
+      h_process,
+      kProcessBasicInformation,
+      &out_pbi,
+      static_cast<ULONG>(sizeof(out_pbi)),
+      &return_length);
+  return status == 0 && out_pbi.PebBaseAddress != nullptr;
+}
+
+std::wstring get_process_command_line_from_peb(HANDLE h_process) {
+  PROCESS_BASIC_INFORMATION_RAW pbi{};
+  if (!query_peb_basic_info(h_process, pbi)) {
+    return L"N/A";
+  }
+
+  constexpr ULONG_PTR kPebProcessParametersOffset =
+      (sizeof(PVOID) == 8) ? 0x20U : 0x10U;
+  constexpr ULONG_PTR kCmdLineOffset =
+      (sizeof(PVOID) == 8) ? 0x70U : 0x40U;
+
+  PVOID process_params_addr = nullptr;
+  SIZE_T bytes_read = 0;
+  const std::uintptr_t params_ptr_addr =
+      reinterpret_cast<std::uintptr_t>(pbi.PebBaseAddress) + kPebProcessParametersOffset;
+
+  if (::ReadProcessMemory(
+          h_process,
+          reinterpret_cast<LPCVOID>(params_ptr_addr),
+          &process_params_addr,
+          sizeof(process_params_addr),
+          &bytes_read) == FALSE ||
+      process_params_addr == nullptr) {
+    return L"N/A";
+  }
+
+  UNICODE_STRING_RAW cmd_uni{};
+  const std::uintptr_t cmd_ptr_addr =
+      reinterpret_cast<std::uintptr_t>(process_params_addr) + kCmdLineOffset;
+
+  if (::ReadProcessMemory(
+          h_process,
+          reinterpret_cast<LPCVOID>(cmd_ptr_addr),
+          &cmd_uni,
+          sizeof(cmd_uni),
+          &bytes_read) == FALSE ||
+      cmd_uni.Buffer == nullptr ||
+      cmd_uni.Length == 0) {
+    return L"N/A";
+  }
+
+  const std::size_t byte_len = static_cast<std::size_t>(cmd_uni.Length);
+  const std::size_t char_count = byte_len / sizeof(wchar_t);
+  wchar_t* cmd_buf = static_cast<wchar_t*>(
+      ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, byte_len + sizeof(wchar_t)));
+  if (cmd_buf == nullptr) {
+    return L"N/A";
+  }
+
+  std::wstring result = L"N/A";
+  if (::ReadProcessMemory(
+          h_process,
+          cmd_uni.Buffer,
+          cmd_buf,
+          byte_len,
+          &bytes_read) != FALSE &&
+      bytes_read > 0) {
+    const std::size_t actual_chars = std::min(char_count, static_cast<std::size_t>(bytes_read) / sizeof(wchar_t));
+    result.assign(cmd_buf, actual_chars);
+  }
+
+  ::HeapFree(::GetProcessHeap(), 0, cmd_buf);
+  return result;
+}
+
+std::wstring get_process_owner_name(HANDLE h_process) {
+  HANDLE h_token = nullptr;
+  if (::OpenProcessToken(h_process, TOKEN_QUERY, &h_token) == FALSE || h_token == nullptr) {
+    return L"N/A";
+  }
+
+  DWORD token_size = 0;
+  ::GetTokenInformation(h_token, TokenUser, nullptr, 0, &token_size);
+  if (token_size == 0) {
+    ::CloseHandle(h_token);
+    return L"N/A";
+  }
+
+  BYTE* token_buf = static_cast<BYTE*>(
+      ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, static_cast<std::size_t>(token_size)));
+  if (token_buf == nullptr) {
+    ::CloseHandle(h_token);
+    return L"N/A";
+  }
+
+  std::wstring owner_name = L"N/A";
+  DWORD actual_token_size = token_size;
+  if (::GetTokenInformation(
+          h_token,
+          TokenUser,
+          token_buf,
+          token_size,
+          &actual_token_size) != FALSE) {
+    const PTOKEN_USER p_token_user = reinterpret_cast<PTOKEN_USER>(token_buf);
+    DWORD name_len = 0;
+    DWORD domain_len = 0;
+    SID_NAME_USE sid_use = SidTypeUnknown;
+    ::LookupAccountSidW(
+        nullptr,
+        p_token_user->User.Sid,
+        nullptr,
+        &name_len,
+        nullptr,
+        &domain_len,
+        &sid_use);
+
+    if (name_len > 0 && domain_len > 0) {
+      wchar_t* name_buf = static_cast<wchar_t*>(
+          ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, static_cast<std::size_t>(name_len) * sizeof(wchar_t)));
+      wchar_t* domain_buf = static_cast<wchar_t*>(
+          ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, static_cast<std::size_t>(domain_len) * sizeof(wchar_t)));
+
+      if (name_buf != nullptr && domain_buf != nullptr) {
+        DWORD io_name_len = name_len;
+        DWORD io_domain_len = domain_len;
+        if (::LookupAccountSidW(
+                nullptr,
+                p_token_user->User.Sid,
+                name_buf,
+                &io_name_len,
+                domain_buf,
+                &io_domain_len,
+                &sid_use) != FALSE) {
+          owner_name = std::wstring(domain_buf) + L"\\" + std::wstring(name_buf);
         }
-        CloseHandle(hToken);
+      }
+
+      if (name_buf != nullptr) {
+        ::HeapFree(::GetProcessHeap(), 0, name_buf);
+      }
+      if (domain_buf != nullptr) {
+        ::HeapFree(::GetProcessHeap(), 0, domain_buf);
+      }
     }
-    return privList;
+  }
+
+  ::HeapFree(::GetProcessHeap(), 0, token_buf);
+  ::CloseHandle(h_token);
+  return owner_name;
 }
 
-vector<ModuleRecord> ExtractProcessModules(DWORD pid) {
-    vector<ModuleRecord> moduleList;
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    if (hSnapshot != INVALID_HANDLE_VALUE) {
-        MODULEENTRY32W me;
-        me.dwSize = sizeof(MODULEENTRY32W);
-        if (Module32FirstW(hSnapshot, &me)) {
-            do {
-                ModuleRecord rec;
-                rec.name = me.szModule;
-                rec.fullPath = me.szExePath;
-                rec.baseAddress = me.modBaseAddr;
-                rec.size = me.modBaseSize;
-                moduleList.push_back(rec);
-            } while (Module32NextW(hSnapshot, &me));
+std::wstring get_process_created_time(HANDLE h_process) {
+  FILETIME create_utc{};
+  FILETIME exit_time{};
+  FILETIME kernel_time{};
+  FILETIME user_time{};
+
+  if (::GetProcessTimes(h_process, &create_utc, &exit_time, &kernel_time, &user_time) != FALSE) {
+    FILETIME create_local{};
+    if (::FileTimeToLocalFileTime(&create_utc, &create_local) != FALSE) {
+      SYSTEMTIME sys_time{};
+      if (::FileTimeToSystemTime(&create_local, &sys_time) != FALSE) {
+        std::wostringstream wss;
+        wss << std::setfill(L'0')
+            << std::setw(4) << sys_time.wYear << L"-"
+            << std::setw(2) << sys_time.wMonth << L"-"
+            << std::setw(2) << sys_time.wDay << L" "
+            << std::setw(2) << sys_time.wHour << L":"
+            << std::setw(2) << sys_time.wMinute << L":"
+            << std::setw(2) << sys_time.wSecond;
+        return wss.str();
+      }
+    }
+  }
+  return L"N/A";
+}
+
+std::wstring get_process_architecture(HANDLE h_process) {
+  BOOL is_wow64 = FALSE;
+  if (::IsWow64Process(h_process, &is_wow64) != FALSE) {
+    if (is_wow64 != FALSE) {
+      return L"x86 (32-bit running on 64-bit OS)";
+    }
+    SYSTEM_INFO si{};
+    ::GetNativeSystemInfo(&si);
+    if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
+      return L"x64";
+    }
+    if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) {
+      return L"x86";
+    }
+  }
+  return L"Unknown";
+}
+
+std::vector<privilege_record> extract_process_privileges(HANDLE h_process) {
+  std::vector<privilege_record> priv_list;
+  HANDLE h_token = nullptr;
+  if (::OpenProcessToken(h_process, TOKEN_QUERY, &h_token) == FALSE || h_token == nullptr) {
+    return priv_list;
+  }
+
+  DWORD size = 0;
+  ::GetTokenInformation(h_token, TokenPrivileges, nullptr, 0, &size);
+  if (size == 0) {
+    ::CloseHandle(h_token);
+    return priv_list;
+  }
+
+  BYTE* priv_buf = static_cast<BYTE*>(
+      ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, static_cast<std::size_t>(size)));
+  if (priv_buf == nullptr) {
+    ::CloseHandle(h_token);
+    return priv_list;
+  }
+
+  DWORD actual_size = size;
+  if (::GetTokenInformation(
+          h_token,
+          TokenPrivileges,
+          priv_buf,
+          size,
+          &actual_size) != FALSE) {
+    const PTOKEN_PRIVILEGES p_privs = reinterpret_cast<PTOKEN_PRIVILEGES>(priv_buf);
+    for (DWORD i = 0; i < p_privs->PrivilegeCount; ++i) {
+      DWORD name_len = 0;
+      ::LookupPrivilegeNameW(nullptr, &p_privs->Privileges[i].Luid, nullptr, &name_len);
+      if (name_len == 0) {
+        continue;
+      }
+
+      wchar_t* name_buf = static_cast<wchar_t*>(
+          ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, static_cast<std::size_t>(name_len) * sizeof(wchar_t)));
+      if (name_buf != nullptr) {
+        DWORD io_len = name_len;
+        if (::LookupPrivilegeNameW(nullptr, &p_privs->Privileges[i].Luid, name_buf, &io_len) != FALSE) {
+          privilege_record rec{};
+          rec.name = name_buf;
+          rec.state = ((p_privs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED) != 0)
+              ? L"Enabled"
+              : L"Disabled";
+          priv_list.push_back(rec);
         }
-        CloseHandle(hSnapshot);
+        ::HeapFree(::GetProcessHeap(), 0, name_buf);
+      }
     }
-    return moduleList;
+  }
+
+  ::HeapFree(::GetProcessHeap(), 0, priv_buf);
+  ::CloseHandle(h_token);
+  return priv_list;
 }
 
-// VẬN DỤNG TỐI ĐA WINAPI THUẦN: Kiểm tra hiệu năng thực thi của Thread qua GetThreadTimes
-wstring GetThreadRealStatus(DWORD threadId) {
-    wstring statusStr = L"Waiting";
-    // Sử dụng quyền truy vấn WinAPI chuẩn thay vì gọi hàm ngầm ntdll
-    HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, threadId);
-    if (hThread != NULL) {
-        FILETIME cTime, eTime, kTime, uTime;
-        if (GetThreadTimes(hThread, &cTime, &eTime, &kTime, &uTime)) {
-            // Nếu luồng tiêu thụ Kernel Time hoặc User Time lớn hơn 0 trong phiên làm việc, chứng tỏ nó đang Running hoạt động
-            ULARGE_INTEGER kernelTime, userTime;
-            kernelTime.LowPart = kTime.dwLowDateTime;
-            kernelTime.HighPart = kTime.dwHighDateTime;
-            userTime.LowPart = uTime.dwLowDateTime;
-            userTime.HighPart = uTime.dwHighDateTime;
+std::vector<module_record> extract_process_modules(DWORD pid) {
+  std::vector<module_record> module_list;
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(
+      TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+      pid);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return module_list;
+  }
 
-            if (kernelTime.QuadPart > 0 || userTime.QuadPart > 0) {
-                statusStr = L"Running";
-            }
-            else {
-                statusStr = L"Waiting";
-            }
-        }
+  MODULEENTRY32W me{};
+  me.dwSize = static_cast<DWORD>(sizeof(MODULEENTRY32W));
+  if (::Module32FirstW(h_snapshot, &me) != FALSE) {
+    do {
+      module_record rec{};
+      rec.name = me.szModule;
+      rec.full_path = me.szExePath;
+      rec.base_address = me.modBaseAddr;
+      rec.size = me.modBaseSize;
+      module_list.push_back(rec);
+      me = {};
+      me.dwSize = static_cast<DWORD>(sizeof(MODULEENTRY32W));
+    } while (::Module32NextW(h_snapshot, &me) != FALSE);
+  }
 
-        // Kiểm tra trạng thái Suspended thô bằng WinAPI chuẩn
-        DWORD suspendCount = SuspendThread(hThread);
-        if (suspendCount != (DWORD)-1) {
-            ResumeThread(hThread); // Trả lại trạng thái cũ ngay lập tức
-            if (suspendCount > 0) statusStr = L"Suspended";
-        }
-        CloseHandle(hThread);
+  ::CloseHandle(h_snapshot);
+  return module_list;
+}
+
+std::wstring get_thread_real_status(DWORD thread_id) {
+  std::wstring status_str = L"Waiting";
+  const HANDLE h_thread = ::OpenThread(THREAD_QUERY_INFORMATION, FALSE, thread_id);
+  if (h_thread == nullptr || h_thread == INVALID_HANDLE_VALUE) {
+    return status_str;
+  }
+
+  FILETIME c_time{};
+  FILETIME e_time{};
+  FILETIME k_time{};
+  FILETIME u_time{};
+  if (::GetThreadTimes(h_thread, &c_time, &e_time, &k_time, &u_time) != FALSE) {
+    ULARGE_INTEGER kernel_time{};
+    kernel_time.LowPart = k_time.dwLowDateTime;
+    kernel_time.HighPart = k_time.dwHighDateTime;
+
+    ULARGE_INTEGER user_time{};
+    user_time.LowPart = u_time.dwLowDateTime;
+    user_time.HighPart = u_time.dwHighDateTime;
+
+    if (kernel_time.QuadPart > 0 || user_time.QuadPart > 0) {
+      status_str = L"Running";
     }
-    return statusStr;
-}
+  }
 
-vector<ThreadRecord> ExtractProcessThreads(DWORD targetPid) {
-    vector<ThreadRecord> threadList;
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (hSnapshot != INVALID_HANDLE_VALUE) {
-        THREADENTRY32 te;
-        te.dwSize = sizeof(THREADENTRY32);
-        if (Thread32First(hSnapshot, &te)) {
-            do {
-                if (te.th32OwnerProcessID == targetPid) {
-                    ThreadRecord rec;
-                    rec.id = te.th32ThreadID;
-                    rec.priority = te.tpBasePri;
-                    rec.status = GetThreadRealStatus(te.th32ThreadID);
-                    threadList.push_back(rec);
-                }
-            } while (Thread32Next(hSnapshot, &te));
-        }
-        CloseHandle(hSnapshot);
+  const DWORD suspend_count = ::SuspendThread(h_thread);
+  if (suspend_count != static_cast<DWORD>(-1)) {
+    ::ResumeThread(h_thread);
+    if (suspend_count > 0) {
+      status_str = L"Suspended";
     }
-    return threadList;
+  }
+
+  ::CloseHandle(h_thread);
+  return status_str;
 }
 
-// ========================================================================
-// 2. TẦNG THÔNG DỊCH VÀ ĐỊNH DẠNG LOGIC (INTERPRETERS & LOGIC)
-// ========================================================================
+std::vector<thread_record> extract_process_threads(DWORD target_pid) {
+  std::vector<thread_record> thread_list;
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return thread_list;
+  }
 
-wstring TranslatePriorityClass(DWORD priorityClass) {
-    switch (priorityClass) {
-    case IDLE_PRIORITY_CLASS: return L"IDLE_PRIORITY_CLASS";
-    case BELOW_NORMAL_PRIORITY_CLASS: return L"BELOW_NORMAL_PRIORITY_CLASS";
-    case NORMAL_PRIORITY_CLASS: return L"NORMAL_PRIORITY_CLASS";
-    case ABOVE_NORMAL_PRIORITY_CLASS: return L"ABOVE_NORMAL_PRIORITY_CLASS";
-    case HIGH_PRIORITY_CLASS: return L"HIGH_PRIORITY_CLASS";
-    case REALTIME_PRIORITY_CLASS: return L"REALTIME_PRIORITY_CLASS";
-    default: return L"NORMAL_PRIORITY_CLASS";
-    }
+  THREADENTRY32 te{};
+  te.dwSize = static_cast<DWORD>(sizeof(THREADENTRY32));
+  if (::Thread32First(h_snapshot, &te) != FALSE) {
+    do {
+      if (te.th32OwnerProcessID == target_pid) {
+        thread_record rec{};
+        rec.id = te.th32ThreadID;
+        rec.priority = te.tpBasePri;
+        rec.status = get_thread_real_status(te.th32ThreadID);
+        thread_list.push_back(rec);
+      }
+      te = {};
+      te.dwSize = static_cast<DWORD>(sizeof(THREADENTRY32));
+    } while (::Thread32Next(h_snapshot, &te) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return thread_list;
 }
 
-wstring FormatMemorySizeMB(SIZE_T bytes) {
-    wstringstream wss;
-    wss << fixed << setprecision(1) << (double)bytes / (1024 * 1024) << L" MB";
-    return wss.str();
+std::wstring translate_priority_class(DWORD priority_class) {
+  switch (priority_class) {
+    case IDLE_PRIORITY_CLASS:
+      return L"IDLE_PRIORITY_CLASS";
+    case BELOW_NORMAL_PRIORITY_CLASS:
+      return L"BELOW_NORMAL_PRIORITY_CLASS";
+    case NORMAL_PRIORITY_CLASS:
+      return L"NORMAL_PRIORITY_CLASS";
+    case ABOVE_NORMAL_PRIORITY_CLASS:
+      return L"ABOVE_NORMAL_PRIORITY_CLASS";
+    case HIGH_PRIORITY_CLASS:
+      return L"HIGH_PRIORITY_CLASS";
+    case REALTIME_PRIORITY_CLASS:
+      return L"REALTIME_PRIORITY_CLASS";
+    default:
+      return L"NORMAL_PRIORITY_CLASS";
+  }
 }
 
-wstring FormatModuleSizeString(DWORD bytes) {
-    wstringstream wss;
-    if (bytes >= 1024 * 1024) wss << fixed << setprecision(1) << (double)bytes / (1024 * 1024) << L" MB";
-    else wss << (bytes / 1024) << L" KB";
-    return wss.str();
+std::wstring format_memory_size_mb(SIZE_T bytes) {
+  std::wostringstream wss;
+  const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+  wss << std::fixed << std::setprecision(1) << mb << L" MB";
+  return wss.str();
 }
 
-wstring ExtractFileNameFromPath(const wstring& fullPath) {
-    size_t pos = fullPath.find_last_of(L"\\/");
-    return (pos != wstring::npos) ? fullPath.substr(pos + 1) : fullPath;
+std::wstring format_module_size_string(DWORD bytes) {
+  std::wostringstream wss;
+  if (bytes >= 1024U * 1024U) {
+    const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+    wss << std::fixed << std::setprecision(1) << mb << L" MB";
+  } else {
+    wss << (bytes / 1024U) << L" KB";
+  }
+  return wss.str();
 }
 
-// ========================================================================
-// 3. TẦNG HIỂN THỊ CLI REPORT CHUYÊN BIỆT (PRESENTATION LAYER)
-// ========================================================================
-
-void PrintRowFormatted(const wstring& label, const wstring& value) {
-    wcout << left << setw(LAYOUT_WIDTH) << label << L": " << value << endl;
+std::wstring extract_file_name_from_path(const std::wstring& full_path) {
+  const std::size_t pos = full_path.find_last_of(L"\\/");
+  return (pos != std::wstring::npos) ? full_path.substr(pos + 1) : full_path;
 }
 
-void PrintFinalReport(DWORD pid, const ProcessToolhelpCore& toolhelpCore) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    if (hProcess == NULL) {
-        wcerr << L"Loi: Khong the mo ket noi voi PID muc tieu de xuat report.\n";
-        return;
-    }
+void print_row_formatted(const std::wstring& label, const std::wstring& value) {
+  std::wcout << std::left << std::setw(kLayoutWidth) << label << L": " << value << L"\n";
+}
 
-    wstring fullPath = GetProcessExecutablePath(hProcess);
-    wstring procName = ExtractFileNameFromPath(fullPath);
-    DWORD sessionId = 0;
-    ProcessIdToSessionId(pid, &sessionId);
+int print_final_report(DWORD pid, const process_toolhelp_core& toolhelp_core) {
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+      FALSE,
+      pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    const DWORD err = ::GetLastError();
+    std::wcerr << L"Error: Unable to open target PID for report. Win32=" << err << L"\n";
+    return (err != ERROR_SUCCESS) ? static_cast<int>(err) : static_cast<int>(ERROR_ACCESS_DENIED);
+  }
 
-    DWORD handleCount = 0;
-    GetProcessHandleCount(hProcess, &handleCount);
+  const std::wstring full_path = get_process_executable_path(h_process);
+  const std::wstring proc_name = extract_file_name_from_path(full_path);
 
-    PROCESS_MEMORY_COUNTERS_EX pmc;
-    pmc.cb = sizeof(PROCESS_MEMORY_COUNTERS_EX);
-    GetProcessMemoryInfo(hProcess, (PPROCESS_MEMORY_COUNTERS)&pmc, sizeof(pmc));
+  DWORD session_id = 0;
+  if (::ProcessIdToSessionId(pid, &session_id) == FALSE) {
+    session_id = 0;
+  }
 
-    BOOL isTargetWow64 = FALSE;
-    IsWow64Process(hProcess, &isTargetWow64);
+  DWORD handle_count = 0;
+  ::GetProcessHandleCount(h_process, &handle_count);
 
-    wcout << L"===========================================\n";
-    wcout << L"PROCESS INFORMATION REPORT\n";
-    wcout << L"===========================================\n\n";
+  PROCESS_MEMORY_COUNTERS_EX pmc{};
+  pmc.cb = static_cast<DWORD>(sizeof(PROCESS_MEMORY_COUNTERS_EX));
+  ::GetProcessMemoryInfo(
+      h_process,
+      reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&pmc),
+      static_cast<DWORD>(sizeof(pmc)));
 
-    wcout << L"[PROCESS BASIC INFO]\n";
-    wcout << L"-------------------------------------------\n";
-    PrintRowFormatted(L"Process Name", procName);
-    PrintRowFormatted(L"Process ID (PID)", to_wstring(pid));
-    PrintRowFormatted(L"Parent PID", to_wstring(toolhelpCore.parentPid));
-    PrintRowFormatted(L"Executable Path", fullPath);
-    PrintRowFormatted(L"Command Line", GetProcessCommandLineFromPeb(hProcess));
-    PrintRowFormatted(L"Session ID", to_wstring(sessionId));
-    PrintRowFormatted(L"Priority Class", TranslatePriorityClass(GetPriorityClass(hProcess)));
-    PrintRowFormatted(L"Handle Count", to_wstring(handleCount));
-    PrintRowFormatted(L"Thread Count", to_wstring(toolhelpCore.threadCount));
-    PrintRowFormatted(L"Architecture", GetProcessArchitecture(hProcess));
-    PrintRowFormatted(L"Created Time", GetProcessCreatedTime(hProcess));
-    PrintRowFormatted(L"User", GetProcessOwnerName(hProcess));
-    wcout << L"\n-------------------------------------------\n";
+  BOOL is_target_wow64 = FALSE;
+  ::IsWow64Process(h_process, &is_target_wow64);
 
-    wcout << L"[PRIVILEGES]\n";
-    wcout << L"-------------------------------------------\n";
-    vector<PrivilegeRecord> privileges = ExtractProcessPrivileges(hProcess);
-    if (privileges.empty()) wcout << L"No privileges available or access denied.\n";
+  std::wcout
+      << L"===========================================\n"
+      << L"PROCESS INFORMATION REPORT\n"
+      << L"===========================================\n\n"
+      << L"[PROCESS BASIC INFO]\n"
+      << L"-------------------------------------------\n";
+
+  print_row_formatted(L"Process Name", proc_name);
+  print_row_formatted(L"Process ID (PID)", std::to_wstring(pid));
+  print_row_formatted(L"Parent PID", std::to_wstring(toolhelp_core.parent_pid));
+  print_row_formatted(L"Executable Path", full_path);
+  print_row_formatted(L"Command Line", get_process_command_line_from_peb(h_process));
+  print_row_formatted(L"Session ID", std::to_wstring(session_id));
+  print_row_formatted(L"Priority Class", translate_priority_class(::GetPriorityClass(h_process)));
+  print_row_formatted(L"Handle Count", std::to_wstring(handle_count));
+  print_row_formatted(L"Thread Count", std::to_wstring(toolhelp_core.thread_count));
+  print_row_formatted(L"Architecture", get_process_architecture(h_process));
+  print_row_formatted(L"Created Time", get_process_created_time(h_process));
+  print_row_formatted(L"User", get_process_owner_name(h_process));
+
+  std::wcout
+      << L"\n-------------------------------------------\n"
+      << L"[PRIVILEGES]\n"
+      << L"-------------------------------------------\n";
+
+  const std::vector<privilege_record> privileges = extract_process_privileges(h_process);
+  if (privileges.empty()) {
+    std::wcout << L"No privileges available or access denied.\n";
+  } else {
     for (const auto& priv : privileges) {
-        wcout << left << setw(30) << priv.name << L": " << priv.state << endl;
+      std::wcout << std::left << std::setw(30) << priv.name << L": " << priv.state << L"\n";
     }
-    wcout << L"\n-------------------------------------------\n";
+  }
 
-    wcout << L"[MEMORY USAGE]\n";
-    wcout << L"-------------------------------------------\n";
-    PrintRowFormatted(L"Working Set (RAM)", FormatMemorySizeMB(pmc.WorkingSetSize));
-    PrintRowFormatted(L"Private Bytes", FormatMemorySizeMB(pmc.PrivateUsage));
-    PrintRowFormatted(L"Pagefile Usage", FormatMemorySizeMB(pmc.PagefileUsage));
-    PrintRowFormatted(L"Peak Working Set", FormatMemorySizeMB(pmc.PeakWorkingSetSize));
-    wcout << L"\n-------------------------------------------\n";
+  std::wcout
+      << L"\n-------------------------------------------\n"
+      << L"[MEMORY USAGE]\n"
+      << L"-------------------------------------------\n";
 
-    wcout << L"[MODULES LOADED]\n";
-    wcout << L"-------------------------------------------\n";
-    wcout << left << setw(18) << L"Base Address" << L" " << left << setw(10) << L"Size" << L" Module Name (Full Path)\n";
-    wcout << L"-------------------------------------------\n";
+  print_row_formatted(L"Working Set (RAM)", format_memory_size_mb(pmc.WorkingSetSize));
+  print_row_formatted(L"Private Bytes", format_memory_size_mb(pmc.PrivateUsage));
+  print_row_formatted(L"Pagefile Usage", format_memory_size_mb(pmc.PagefileUsage));
+  print_row_formatted(L"Peak Working Set", format_memory_size_mb(pmc.PeakWorkingSetSize));
 
-    vector<ModuleRecord> modules = ExtractProcessModules(pid);
-    for (const auto& mod : modules) {
-        // TỐI ƯU TOÁN HỌC: Tự động điều chỉnh độ rộng trường hex (8 ký tự cho 32-bit, 16 ký tự cho 64-bit)
-        int addressWidth = isTargetWow64 ? 8 : 16;
-        wcout << L"0x" << uppercase << hex << setw(addressWidth) << setfill(L'0') << reinterpret_cast<ULONG_PTR>(mod.baseAddress)
-            << nouppercase << dec << setfill(L' ') << L" " << right << setw(7) << FormatModuleSizeString(mod.size)
-            << L"    " << mod.fullPath << endl;
-    }
-    wcout << L"Total Modules Loaded : " << modules.size() << endl;
-    wcout << L"\n-------------------------------------------\n";
+  std::wcout
+      << L"\n-------------------------------------------\n"
+      << L"[MODULES LOADED]\n"
+      << L"-------------------------------------------\n"
+      << std::left << std::setw(18) << L"Base Address" << L" "
+      << std::left << std::setw(10) << L"Size" << L" Module Name (Full Path)\n"
+      << L"-------------------------------------------\n";
 
-    wcout << L"[THREADS]\n";
-    wcout << L"-------------------------------------------\n";
-    wcout << left << setw(12) << L"Thread ID" << left << setw(16) << L"Base Priority" << L"Status\n";
-    wcout << L"-------------------------------------------\n";
+  const std::vector<module_record> modules = extract_process_modules(pid);
+  const int address_width = (is_target_wow64 != FALSE) ? 8 : 16;
+  for (const auto& mod : modules) {
+    std::wcout
+        << L"0x" << std::uppercase << std::hex << std::setw(address_width) << std::setfill(L'0')
+        << reinterpret_cast<ULONG_PTR>(mod.base_address)
+        << std::nouppercase << std::dec << std::setfill(L' ') << L" "
+        << std::right << std::setw(7) << format_module_size_string(mod.size)
+        << L"    " << mod.full_path << L"\n";
+  }
+  std::wcout << L"Total Modules Loaded : " << modules.size() << L"\n";
 
-    // 1. Trích xuất danh sách luồng sâu từ Kernel bằng bộ quét Hybrid
-    vector<ThreadRecord> threads = ExtractProcessThreads(pid);
+  std::wcout
+      << L"\n-------------------------------------------\n"
+      << L"[THREADS]\n"
+      << L"-------------------------------------------\n"
+      << std::left << std::setw(12) << L"Thread ID"
+      << std::left << std::setw(16) << L"Base Priority"
+      << L"Status\n"
+      << L"-------------------------------------------\n";
 
-    // 2. TỐI ƯU GIAO DIỆN: Sắp xếp các bản ghi Thread tăng dần theo Thread ID (TID)
-    // Sử dụng biểu thức Lambda để so sánh trường id thô
-    std::sort(threads.begin(), threads.end(), [](const ThreadRecord& a, const ThreadRecord& b) {
+  std::vector<thread_record> threads = extract_process_threads(pid);
+  std::sort(
+      threads.begin(),
+      threads.end(),
+      [](const thread_record& a, const thread_record& b) noexcept {
         return a.id < b.id;
-        });
+      });
 
-    // 3. Đẩy dữ liệu sạch đã sắp xếp ra tầng hiển thị CLI
-    for (const auto& th : threads) {
-        wcout << left << setw(12) << th.id << left << setw(16) << th.priority << th.status << endl;
-    }
-    wcout << L"Total Threads: " << threads.size() << endl;
+  for (const auto& th : threads) {
+    std::wcout
+        << std::left << std::setw(12) << th.id
+        << std::left << std::setw(16) << th.priority
+        << th.status << L"\n";
+  }
+  std::wcout << L"Total Threads: " << threads.size() << L"\n";
 
-    wcout << L"\n-------------------------------------------\n";
-    wcout << L"[SYSTEM CONTEXT]\n";
-    wcout << L"-------------------------------------------\n";
-    PrintRowFormatted(L"Process Bitness", (sizeof(PVOID) == 8) ? L"64-bit" : L"32-bit");
-    PrintRowFormatted(L"OS Architecture", L"x64");
-    PrintRowFormatted(L"IsWow64Process", isTargetWow64 ? L"Yes" : L"No");
+  std::wcout
+      << L"\n-------------------------------------------\n"
+      << L"[SYSTEM CONTEXT]\n"
+      << L"-------------------------------------------\n";
 
-    HMODULE hModNt = GetModuleHandleW(L"ntdll.dll");
-    PVOID imageBase = NULL;
-    if (hModNt) {
-        NtQueryInformationProcessPtr NtQueryInformationProcess =
-            (NtQueryInformationProcessPtr)GetProcAddress(hModNt, "NtQueryInformationProcess");
-        PROCESS_BASIC_INFORMATION pbi;
-        ULONG retLen = 0;
-        if (NtQueryInformationProcess && NtQueryInformationProcess(hProcess, 0, &pbi, sizeof(pbi), &retLen) == 0) {
-            ULONG_PTR baseOffset = (sizeof(PVOID) == 8) ? 0x10 : 0x08;
-            ReadProcessMemory(hProcess, (PBYTE)pbi.PebBaseAddress + baseOffset, &imageBase, sizeof(PVOID), NULL);
-        }
-    }
-    wcout << L"PEB ImageBaseAddress : 0x" << hex << uppercase << reinterpret_cast<ULONG_PTR>(imageBase) << nouppercase << dec << endl;
-    PrintRowFormatted(L"Image Path from PEB", fullPath);
+  print_row_formatted(L"Process Bitness", (sizeof(PVOID) == 8) ? L"64-bit" : L"32-bit");
+  print_row_formatted(L"OS Architecture", L"x64");
+  print_row_formatted(L"IsWow64Process", (is_target_wow64 != FALSE) ? L"Yes" : L"No");
 
-    wcout << L"===========================================\n";
-    wcout << L"END OF REPORT\n";
-    wcout << L"===========================================\n";
+  PVOID image_base = nullptr;
+  PROCESS_BASIC_INFORMATION_RAW pbi{};
+  if (query_peb_basic_info(h_process, pbi)) {
+    constexpr ULONG_PTR kPebImageBaseOffset =
+        (sizeof(PVOID) == 8) ? 0x10U : 0x08U;
+    SIZE_T bytes_read = 0;
+    const std::uintptr_t base_ptr_addr =
+        reinterpret_cast<std::uintptr_t>(pbi.PebBaseAddress) + kPebImageBaseOffset;
+    ::ReadProcessMemory(
+        h_process,
+        reinterpret_cast<LPCVOID>(base_ptr_addr),
+        &image_base,
+        sizeof(image_base),
+        &bytes_read);
+  }
 
-    CloseHandle(hProcess);
+  std::wcout
+      << L"PEB ImageBaseAddress : 0x"
+      << std::hex << std::uppercase << reinterpret_cast<ULONG_PTR>(image_base)
+      << std::nouppercase << std::dec << L"\n";
+  print_row_formatted(L"Image Path from PEB", full_path);
+
+  std::wcout
+      << L"===========================================\n"
+      << L"END OF REPORT\n"
+      << L"===========================================\n";
+
+  ::CloseHandle(h_process);
+  return 0;
 }
+
+}  // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
-    if (_setmode(_fileno(stdout), _O_U16TEXT) == -1) return 1;
+  if (_setmode(_fileno(stdout), _O_U16TEXT) == -1) {
+    return 1;
+  }
+  _setmode(_fileno(stderr), _O_U16TEXT);
 
-    if (argc < 3) {
-        wcout << L"Su dung: project.exe -n <process_name> hoac -p <PID>\n";
-        wcout << L"Vi du  : project.exe -n notepad.exe\n";
-        return 1;
-    }
+  if (argc < 3 || argv == nullptr || argv[1] == nullptr || argv[2] == nullptr) {
+    std::wcout
+        << L"Usage: process_info.exe -n <process_name> | -p <PID>\n"
+        << L"Example: process_info.exe -n notepad.exe\n";
+    return 1;
+  }
 
-    wstring argumentFlag = argv[1];
-    wstring argumentValue = argv[2];
-    DWORD targetPid = 0;
-    ProcessToolhelpCore toolhelpCore = { 0, 0, false };
+  const std::wstring arg_flag(argv[1]);
+  const std::wstring arg_value(argv[2]);
+  process_toolhelp_core toolhelp_core{};
 
-    if (argumentFlag == L"-p") {
-        targetPid = stoul(argumentValue);
-        toolhelpCore = ExtractTargetProcessCoreInfo(targetPid, L"", true);
+  if (arg_flag == L"-p") {
+    DWORD target_pid = 0;
+    if (!parse_pid_u32(argv[2], target_pid)) {
+      std::wcerr << L"Error: Invalid PID argument.\n";
+      return static_cast<int>(ERROR_INVALID_PARAMETER);
     }
-    else if (argumentFlag == L"-n") {
-        toolhelpCore = ExtractTargetProcessCoreInfo(0, argumentValue, false);
-        if (toolhelpCore.found) {
-            targetPid = GetLastError();
-        }
-    }
-    else {
-        wcout << L"Loi: Co lenh khong hop le. Chi chap nhan -n hoac -p\n";
-        return 1;
-    }
+    toolhelp_core = extract_target_process_core_info(target_pid, L"", true);
+  } else if (arg_flag == L"-n") {
+    toolhelp_core = extract_target_process_core_info(0, arg_value, false);
+  } else {
+    std::wcerr << L"Error: Invalid flag. Expected -n or -p.\n";
+    return static_cast<int>(ERROR_INVALID_PARAMETER);
+  }
 
-    if (!toolhelpCore.found) {
-        wcout << L"Loi: Khong tim thay tien trinh muc tieu he thong.\n";
-        return 1;
-    }
+  if (!toolhelp_core.found) {
+    std::wcerr << L"Error: Target process not found.\n";
+    return static_cast<int>(ERROR_NOT_FOUND);
+  }
 
-    PrintFinalReport(targetPid, toolhelpCore);
-    return 0;
+  return print_final_report(toolhelp_core.pid, toolhelp_core);
 }
