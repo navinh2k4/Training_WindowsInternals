@@ -23,6 +23,7 @@ VirtualProtect (PAGE_EXECUTE_READ)  ──► Enforces W^X separation
        │
        ▼
 CreateThread / WaitForSingleObject  ──► Thread scheduling & cleanup
+```
 Page Allocation & Protection (VirtualAlloc / VirtualProtect): Allocating memory directly with PAGE_EXECUTE_READWRITE (RWX) is a common telemetry indicator for defenders. Transitioning from PAGE_READWRITE to PAGE_EXECUTE_READ avoids leaving writable executable pages exposed.
 
 Thread Lifecycle & Cleanup: Secondary threads execute under the process token and must be synchronized and closed via CloseHandle, while allocated virtual regions are released with VirtualFree(..., MEM_RELEASE).
