@@ -1,14 +1,16 @@
+
 #pragma once
-#include <Windows.h>
 
-typedef struct BASE_RELOCATION_BLOCK {
-    DWORD PageAddress;
-    DWORD BlockSize;
-} BASE_RELOCATION_BLOCK, * PBASE_RELOCATION_BLOCK;
+#include <windows.h>
 
-typedef struct BASE_RELOCATION_ENTRY {
-    USHORT Offset : 12;
-    USHORT Type : 4;
-} BASE_RELOCATION_ENTRY, * PBASE_RELOCATION_ENTRY;
+#include <cstdint>
 
-using DLLEntry = BOOL(WINAPI*)(HINSTANCE dll, DWORD reason, LPVOID reserved);
+struct base_relocation_block final {
+  DWORD page_address = 0;
+  DWORD block_size = 0;
+};
+
+struct base_relocation_entry final {
+  std::uint16_t offset : 12;
+  std::uint16_t type : 4;
+};
