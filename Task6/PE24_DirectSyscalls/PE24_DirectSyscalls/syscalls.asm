@@ -1,19 +1,11 @@
+
 .code
 
-; Dinh nghia cong Syscall truc tiep cho ham NtAllocateVirtualMemory
-NtAllocateVirtualMemoryProc proc
+nt_query_virtual_memory_stub proc
     mov r10, rcx
-    mov eax, 18h          ; Syscall Number mac dinh cua NtAllocateVirtualMemory
+    mov eax, 23h
     syscall
     ret
-NtAllocateVirtualMemoryProc endp
-
-; Dinh nghia cong Syscall truc tiep cho ham NtWriteVirtualMemory
-NtWriteVirtualMemoryProc proc
-    mov r10, rcx
-    mov eax, 3Ah          ; Syscall Number mac dinh cua NtWriteVirtualMemory
-    syscall
-    ret
-NtWriteVirtualMemoryProc endp
+nt_query_virtual_memory_stub endp
 
 end
