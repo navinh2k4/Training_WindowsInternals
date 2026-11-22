@@ -1,129 +1,113 @@
+
 #include <windows.h>
 #include <tlhelp32.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cwchar>
 #include <iostream>
-#include <string>
-#include <vector>
 
-// 1. Định nghĩa cấu trúc dữ liệu con trỏ tuyệt đối gánh luồng xử lý độc lập vị trí
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
+namespace {
 
-typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} THREAD_DATA, * PTHREAD_DATA;
+struct inspection_context final {
+  DWORD target_pid = 0;
+  std::size_t sample_span_bytes = 0;
+  DWORD status_code = ERROR_SUCCESS;
+};
 
-// 2. Hàm chức năng sẽ được bốc tách mã máy để tiêm sang Notepad
-// Hàm này tuân thủ tuyệt đối quy tắc độc lập vị trí: CHỈ dùng dữ liệu từ lpParam
-DWORD WINAPI InjectedFunction(LPVOID lpParam) {
-    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        // Khai hỏa bằng con trỏ tuyệt đối, né hoàn toàn hàng rào Loader Lock và lỗi RIP-Relative
-        pData->pWinExec(pData->szCommand, SW_HIDE);
-    }
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
+  }
+
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
+    return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-// Hàm rỗng đánh dấu điểm kết thúc kịch khung để ước tính dung lượng mã máy
-DWORD WINAPI InjectedFunctionEnd() { return 0; }
-
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
-
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                processID = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
-    }
-    CloseHandle(hSnapshot);
-    return processID;
+DWORD WINAPI worker_thread_routine(LPVOID lp_param) noexcept {
+  auto* ctx = static_cast<inspection_context*>(lp_param);
+  if (ctx == nullptr) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  ctx->status_code = ERROR_SUCCESS;
+  return ERROR_SUCCESS;
 }
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 09: PE CODE INJECTION REMOTE" << std::endl;
-    std::cout << "====================================================" << std::endl;
+DWORD WINAPI worker_thread_end_marker() noexcept {
+  return 0;
+}
 
-    std::wstring targetProcess = L"notepad.exe";
-    DWORD pid = GetProcessIDByName(targetProcess);
-
-    if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc." << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
+std::size_t compute_bounded_span() noexcept {
+  const auto start_addr = reinterpret_cast<std::uintptr_t>(&worker_thread_routine);
+  const auto end_addr = reinterpret_cast<std::uintptr_t>(&worker_thread_end_marker);
+  if (end_addr > start_addr) {
+    const std::size_t diff = static_cast<std::size_t>(end_addr - start_addr);
+    if (diff > 0 && diff <= 4096U) {
+      return diff;
     }
+  }
+  return 256U;
+}
 
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
+}  // namespace
 
-    // Tính toán kích thước động an toàn cho khối lệnh thực thi
-    SIZE_T functionSize = 500;
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess that bai!" << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
-    }
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 09: LOCAL WORKER THREAD & MEMORY LAYOUT STUDY\n"
+      << L"====================================================\n";
 
-    // ─── BƯỚC 1: CẤP PHÁT VÙNG NHỚ TỪ XA MANG QUYỀN RWX ĐỂ CHỨA MÃ MÁY CỦA HÀM ───
-    LPVOID remoteCodeBuffer = VirtualAllocEx(hProcess, NULL, functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+  const DWORD observed_pid = find_process_id_by_name(kTargetProcess);
+  if (observed_pid == 0) {
+    std::wcout << L"[*] Process '" << kTargetProcess << L"' is not currently running.\n";
+  } else {
+    std::wcout << L"[+] Observed target process '" << kTargetProcess
+               << L"' (PID=" << observed_pid << L").\n";
+  }
 
-    // Cấp phát phân vùng dữ liệu từ xa mang quyền RW để chứa tham số cấu trúc tuyệt đối
-    PTHREAD_DATA pRemoteData = (PTHREAD_DATA)VirtualAllocEx(hProcess, NULL, sizeof(THREAD_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  inspection_context ctx{};
+  ctx.target_pid = observed_pid;
+  ctx.sample_span_bytes = compute_bounded_span();
 
-    if (!remoteCodeBuffer || !pRemoteData) {
-        std::cerr << "[-] VirtualAllocEx tu xa that bai!" << std::endl;
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Vung nho Code RWX trong Notepad dat tai: 0x" << std::hex << remoteCodeBuffer << std::endl;
+  const HANDLE h_thread = ::CreateThread(
+      nullptr,
+      0,
+      &worker_thread_routine,
+      &ctx,
+      0,
+      nullptr);
+  if (h_thread == nullptr) {
+    std::wcerr << L"[-] CreateThread failed. Win32=" << ::GetLastError() << L"\n";
+    return 1;
+  }
 
-    // ─── BƯỚC 2: KHỞI TẠO DỮ LIỆU TUYỆT ĐỐI VÀ ĐẨY XUYÊN BIÊN GIỚI SANG RAM ĐÍCH ───
-    THREAD_DATA localData;
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        // Trích xuất chính xác tọa độ tuyệt đối của WinExec nạp sang Notepad
-        localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
-    }
-    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
+  ::WaitForSingleObject(h_thread, INFINITE);
+  ::CloseHandle(h_thread);
 
-    // Tiến hành ánh xạ chép khối mã máy và cấu trúc dữ liệu sang RAM đối phương
-    WriteProcessMemory(hProcess, remoteCodeBuffer, (LPCVOID)InjectedFunction, functionSize, NULL);
-    WriteProcessMemory(hProcess, pRemoteData, &localData, sizeof(THREAD_DATA), NULL);
-    std::cout << "[+] Anh xa tung segment ma may va du lieu sang RAM doi phuong hoan tat." << std::endl;
-
-    std::cout << "[*] Dang khoi tao luong CreateRemoteThread de kich no..." << std::endl;
-
-    // ─── BƯỚC 3: ÉP TIẾN TRÌNH ĐÍCH TỰ SINH LUỒNG CHẠY MÃ MÁY ───
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteCodeBuffer, pRemoteData, 0, NULL);
-
-    if (hThread != NULL) {
-        // Sử dụng cờ INFINITE để đảm bảo tiến trình hoàn tất việc mở máy tính một cách an toàn
-        WaitForSingleObject(hThread, INFINITE);
-        std::cout << "[+] Luong Thread tu xa da hoan thanh nhiem vu kich no!" << std::endl;
-        CloseHandle(hThread);
-    }
-    else {
-        std::cerr << "[-] CreateRemoteThread failed! Error: " << GetLastError() << std::endl;
-    }
-
-    // ── ĐƯA LỆNH DỪNG LÊN ĐÂY ĐỂ ĐÓNG BĂNG RAM TRƯỚC KHI GIẢI PHÓNG ──
-    std::cout << "\n[+] PE Code Injection Process Completed Successfully!" << std::endl;
-    std::cout << "[*] PAUSE: Check System Informer inside 'notepad.exe' Memory Map NOW for RWX!" << std::endl;
-    std::cout << "[*] Press Enter HERE to cleanup after verification..." << std::endl;
-    std::cin.get();
-
-    // ─── BƯỚC 4: GIẢI PHÓNG TÀI NGUYÊN CHỐNG MEMORY LEAK ───
-    VirtualFreeEx(hProcess, remoteCodeBuffer, 0, MEM_RELEASE);
-    VirtualFreeEx(hProcess, pRemoteData, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
-
-    return EXIT_SUCCESS;
+  std::wcout
+      << L"[+] Worker thread completed (status=" << ctx.status_code
+      << L", measured_span=" << ctx.sample_span_bytes << L" bytes).\n";
+  return 0;
 }
